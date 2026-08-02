@@ -3,10 +3,15 @@ api-spec.json
 test-cases.json
 test-results.json
 test-results.xml
+test-load-results.json
+test-security-results.json
 test-heal-report.json
 report.html
 docs.md
+coverage.md
+migration.md
 test-cases.json.bak
+*.bak
 responses/
 
 # Environment files (real secrets)
