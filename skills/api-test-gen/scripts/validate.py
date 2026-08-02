@@ -39,7 +39,9 @@ def validate(cases_path: Path, spec_path: Path | None) -> list[str]:
                                   "header", "header_exists", "content_type", "body_contains",
                                   "body_not_contains", "body_regex", "body_size",
                                   "no_reflected_payload", "json_path", "json_path_exists",
-                                  "json_path_type", "schema_matches", "error_structure"}
+                                  "json_path_type", "json_path_in", "json_path_not_in",
+                                  "business_ok", "business_not_ok",
+                                  "schema_matches", "error_structure"}
         for j, a in enumerate(c.get("assertions") or []):
             if a.get("type") not in valid_assertion_types:
                 errors.append(f"{loc}.assertions[{j}]: unknown assertion type {a.get('type')}")

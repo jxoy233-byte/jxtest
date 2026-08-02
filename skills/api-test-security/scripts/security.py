@@ -5,13 +5,16 @@ Generates security test cases from api-spec.json, runs them via api-test-run,
 and aggregates results into severity-ranked findings.
 """
 import argparse
+import importlib.util
 import json
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from _common import build_url, execute, resolve_auth, load_env
+from _common import (build_url, execute, resolve_auth, load_env,
+                     load_envelope, parse_envelope_arg, classify, describe)
+
 
 # Sensitive data patterns to scan response bodies
 SENSITIVE_PATTERNS = [
@@ -60,8 +63,7 @@ def gen_idor(endpoint: dict) -> list[dict]:
     probe = "0"  # one probe per endpoint is enough to detect IDOR
     p = path_params[0]
     path = endpoint["path"].replace("{" + p["name"] + "}", probe)
-    return [_case(endpoint, path, "idor", "IDOR probe",
-                  {"type": "status_in", "expected": [403, 404]})]
+    return [_case(endpoint, path, "idor", "IDOR probe", {"type": "safe_response"})]
 
 
 def gen_broken_auth(endpoint: dict) -> list[dict]:
@@ -74,7 +76,7 @@ def gen_broken_auth(endpoint: dict) -> list[dict]:
         ("expired", {"Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjEwfQ.fake"}, "broken_auth_expired"),
     ]
     return [_case(endpoint, endpoint["path"].replace("{id}", "1"), sec_type, f"auth: {tag}",
-                  {"type": "status_in", "expected": [401, 403]},
+                  {"type": "safe_response"},
                   headers=extra) for tag, extra, sec_type in variants]
 
 
@@ -104,7 +106,7 @@ def gen_path_traversal(endpoint: dict) -> list[dict]:
     else:
         path, q = endpoint["path"], {p["name"]: payload}
     return [_case(endpoint, path, "path_traversal", "path traversal",
-                  {"type": "status_in", "expected": [400, 403, 404, 422]},
+                  {"type": "safe_response"},
                   query=q,
                   extra_assertion={"type": "no_reflected_payload", "payload": "root:"})]
 
@@ -129,7 +131,7 @@ def gen_ssrf(endpoint: dict) -> list[dict]:
         body = {**body, "url": payload}
         path, q, headers = endpoint["path"], {}, {"Content-Type": "application/json"}
     return [_case(endpoint, path, "ssrf", "SSRF probe",
-                  {"type": "status_in", "expected": [400, 403, 422]},
+                  {"type": "safe_response"},
                   query=q, headers=headers, body=body,
                   extra_assertion={"type": "no_reflected_payload", "payload": "169.254.169.254"})]
 
@@ -184,14 +186,20 @@ def generate_security_cases(spec: dict) -> list[dict]:
     return cases
 
 
-def run_one(case: dict, base_url: str, auth_headers: dict, timeout: float, scopes: list[dict]):
+def run_one(case: dict, base_url: str, auth_headers: dict, timeout: float, scopes: list[dict],
+            envelope: dict | None = None, pre_hook=None):
     url = build_url(base_url, case["path"], case.get("query"))
-    headers = dict(case.get("headers", {}))
-    headers.update(auth_headers)
+    # Case headers win over auth: the broken_auth probes deliberately send a bad
+    # Authorization header, and injecting the real token would defeat them.
+    headers = {**auth_headers, **case.get("headers", {})}
+    if pre_hook:
+        ctx = {"case": case, "headers": headers, "context": {}}
+        pre_hook(ctx)
+        headers = dict(ctx["headers"])
     resp = execute(url, case["method"], headers, case.get("body"), timeout)
     assertion_results = []
     for a in case.get("assertions", []):
-        assertion_results.append(_run_assertion(a, resp))
+        assertion_results.append(_run_assertion(a, resp, envelope))
     all_passed = all(a["passed"] for a in assertion_results)
     return {
         "caseId": case["id"],
@@ -199,15 +207,24 @@ def run_one(case: dict, base_url: str, auth_headers: dict, timeout: float, scope
         "securityType": case.get("securityType"),
         "status": "passed" if all_passed else "failed",
         "httpStatus": resp.get("status"),
+        "outcome": classify(resp, envelope),
+        "observed": describe(resp, envelope),
         "body": resp.get("body", "")[:8192],  # for sensitive scan
         "assertions": assertion_results,
     }
 
 
-def _run_assertion(a: dict, resp: dict) -> dict:
+def _run_assertion(a: dict, resp: dict, envelope: dict | None = None) -> dict:
     t = a["type"]
     if resp.get("networkError"):
         return {**a, "passed": False, "skipped": "network_error"}
+    if t == "safe_response":
+        # The probe is safe when the request was refused. Under an envelope API the
+        # refusal lives in the body, not the HTTP status — checking the status alone
+        # is what made every enveloped endpoint look vulnerable.
+        outcome = classify(resp, envelope)
+        return {**a, "actual": describe(resp, envelope), "outcome": outcome,
+                "passed": outcome == "rejected"}
     if t == "status":
         return {**a, "actual": resp.get("status"), "passed": resp.get("status") == a["expected"]}
     if t == "status_in":
@@ -217,6 +234,7 @@ def _run_assertion(a: dict, resp: dict) -> dict:
     if t == "body_not_contains":
         return {**a, "passed": a["text"] not in (resp.get("body") or "")}
     return {**a, "passed": False, "error": f"unknown assertion: {t}"}
+
 
 
 def build_findings(results: list[dict]) -> list[dict]:
@@ -242,16 +260,36 @@ def build_findings(results: list[dict]) -> list[dict]:
         # Standard: failed = vulnerable, passed = safe
         if r["status"] == "failed":
             sec_type = r["securityType"]
+            severity = SEVERITY.get(sec_type, "medium")
+            observed = r.get("observed") or f"HTTP {r.get('httpStatus')}"
+            evidence = f"Got {observed}, expected the request to be refused"
+            # A 5xx means the probe crashed the handler. That is a defect worth
+            # fixing, but it is not evidence that the attack succeeded — reporting
+            # it as critical drowns the real findings.
+            if r.get("outcome") == "server_error":
+                severity = "medium" if severity in ("critical", "high") else severity
+                evidence = (f"Got {observed} — server error, likely a bug "
+                            f"(missing input validation), not a confirmed vulnerability")
             findings.append({
                 "endpointId": r["endpointId"],
                 "caseId": r["caseId"],
                 "securityType": sec_type,
-                "severity": SEVERITY.get(sec_type, "medium"),
-                "vulnerable": True,
-                "evidence": f"Got HTTP {r['httpStatus']}, expected safe response",
+                "severity": severity,
+                "vulnerable": r.get("outcome") != "server_error",
+                "evidence": evidence,
                 "description": ATTACK_DESCRIPTIONS.get(sec_type, sec_type),
             })
     return findings
+
+
+
+def _load_pre_script(path: str | None):
+    if not path:
+        return None
+    spec = importlib.util.spec_from_file_location("sec_pre_script", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return getattr(mod, "pre", None)
 
 
 def main() -> None:
@@ -264,7 +302,11 @@ def main() -> None:
     ap.add_argument("--parallel", "-p", type=int, default=4)
     ap.add_argument("--include", help="Comma-separated attack types to include (default: all)",
                     default="idor,broken_auth,mass_assignment,path_traversal,ssrf,sensitive_data")
+    ap.add_argument("--token", help="Bearer token to send with every probe (skips spec auth)")
+    ap.add_argument("--pre-script", help="Python file with pre(ctx) hook for custom auth")
+    ap.add_argument("--envelope", help="Business-code envelope, e.g. 'code:0' (overrides api-spec.json)")
     args = ap.parse_args()
+
 
     spec_path = Path(args.spec)
     if not spec_path.exists():
@@ -296,17 +338,31 @@ def main() -> None:
         sys.exit("Error: no security cases generated (spec may have no endpoints)")
 
     scopes = load_env(args.env)
-    auth_headers = resolve_auth(spec.get("auth"), scopes)
+    if args.token:
+        auth_headers = {"Authorization": f"Bearer {args.token}"}
+    else:
+        auth_headers = resolve_auth(spec.get("auth"), scopes, base_url).headers()
+    if auth_headers.get("error"):
+        sys.exit(f"Error: auth failed: {auth_headers['error']}\n"
+                 f"       set `auth` in api-spec.json, or pass --token / --pre-script")
+
+    envelope = parse_envelope_arg(args.envelope) if args.envelope else load_envelope(spec)
+    pre_hook = _load_pre_script(args.pre_script)
 
     print(f"Running {len(cases)} security probes on {len(spec.get('endpoints', []))} endpoints", file=sys.stderr)
+    if envelope:
+        print(f"Envelope: {envelope['codePath']} in {envelope['successValues']} = success", file=sys.stderr)
 
     results: list[dict] = []
     with ThreadPoolExecutor(max_workers=args.parallel) as ex:
-        futures = [ex.submit(run_one, c, base_url, auth_headers, args.timeout, scopes) for c in cases]
+        futures = [ex.submit(run_one, c, base_url, auth_headers, args.timeout, scopes, envelope, pre_hook)
+                   for c in cases]
         for fut in as_completed(futures):
             results.append(fut.result())
 
     findings = build_findings(results)
+    confirmed = [f for f in findings if f["vulnerable"]]
+    server_errors = [f for f in findings if not f["vulnerable"]]
     by_severity: dict[str, int] = {}
     for f in findings:
         by_severity[f["severity"]] = by_severity.get(f["severity"], 0) + 1
@@ -314,29 +370,37 @@ def main() -> None:
     out = {
         "version": "1.0",
         "baseUrl": base_url,
+        "envelope": envelope,
         "summary": {
             "total_probes": len(cases),
-            "vulnerabilities": len(findings),
+            "vulnerabilities": len(confirmed),
+            "server_errors": len(server_errors),
             "by_severity": by_severity,
             "by_attack": {t: sum(1 for f in findings if f["securityType"] == t)
                           for t in {f["securityType"] for f in findings}},
         },
         "findings": findings,
+
         "raw": results,
     }
     Path(args.output).write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
 
     s = out["summary"]
-    print(f"OK  {s['total_probes']} probes  {s['vulnerabilities']} findings  {args.output}", file=sys.stderr)
+    print(f"OK  {s['total_probes']} probes  {s['vulnerabilities']} vulnerabilities  {args.output}", file=sys.stderr)
+    if s["server_errors"]:
+        print(f"    {s['server_errors']} probes hit a server error (reported separately — "
+              f"likely missing input validation, not an exploit)", file=sys.stderr)
     for sev in ("critical", "high", "medium", "low"):
         n = by_severity.get(sev, 0)
         if n:
             print(f"    {sev}: {n}", file=sys.stderr)
-    # Exit non-zero if critical/high findings
-    if by_severity.get("critical", 0) > 0:
+    # Exit non-zero only for confirmed vulnerabilities
+    confirmed_sev = {f["severity"] for f in confirmed}
+    if "critical" in confirmed_sev:
         sys.exit(2)
-    if by_severity.get("high", 0) > 0:
+    if "high" in confirmed_sev:
         sys.exit(1)
+
 
 
 if __name__ == "__main__":

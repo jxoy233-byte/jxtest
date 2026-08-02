@@ -33,9 +33,11 @@ Find what's NOT tested. Compute coverage metrics from `test-results.json` agains
 2. **Method coverage** — which HTTP methods (GET/POST/etc.) are exercised
 3. **Category coverage** — distribution across positive/negative/boundary/security/enum/format/idempotency
 4. **Status coverage** — which HTTP status codes appeared in responses
-5. **Per-endpoint stats** — total/passed/failed cases, categories seen, statuses seen
-6. **Untested endpoints** — explicit list with `method` + `path`
-7. **Failures by endpoint** — group failed cases for triage
+5. **Response-code coverage** — declared response codes per endpoint vs. actually observed. Catches the "we hit it, but never saw the 422 it was supposed to return" gap.
+6. **Outcome coverage** — business-level outcomes (ok / rejected / server_error) when the run had an envelope configured
+7. **Per-endpoint stats** — total/passed/failed cases, categories seen, statuses seen
+8. **Untested endpoints** — explicit list with `method` + `path`
+9. **Failures by endpoint** — group failed cases for triage
 
 ## Usage
 
@@ -75,6 +77,7 @@ The coverage report tells the AI exactly which endpoints and methods lack tests.
 # API Test Coverage Report
 
 **Endpoint coverage**: 8/10 (80.0%)
+**Response-code coverage**: 12/15 (80.0%)
 **Cases**: 42 total, 38 passed, 4 failed
 
 ## ❌ Untested Endpoints (2)
@@ -83,6 +86,13 @@ The coverage report tells the AI exactly which endpoints and methods lack tests.
 
 ## ⚠️ Untested HTTP Methods
 - `DELETE`: 2 endpoints have no test cases for this method
+
+## ⚠️ Declared Response Codes Never Observed (1 endpoint)
+Reaching an endpoint is not the same as exercising its outcomes.
+
+| Endpoint | Declared but unseen | Observed |
+|----------|---------------------|----------|
+| `POST /items` | 422 | 200 |
 
 ## Per-Endpoint Breakdown
 | Endpoint | Cases | Pass | Fail | Categories | Statuses |

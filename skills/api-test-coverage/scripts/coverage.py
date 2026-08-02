@@ -73,10 +73,30 @@ def compute_coverage(spec: dict, results: dict) -> dict:
             failures_by_ep.setdefault(r["endpointId"], []).append(
                 f"{r['category']}: {r.get('failureClass', r['status'])}")
 
+    # Response-code coverage: which codes the spec declares vs which were observed.
+    # Endpoint coverage says "we called it"; this says "we exercised its outcomes".
+    declared_total = observed_total = 0
+    code_gaps: list[dict] = []
+    for ep_id, ep in spec_endpoints.items():
+        declared = {str(c) for c in (ep.get("responses") or {}) if str(c).isdigit()}
+        if not declared:
+            continue
+        seen = {str(s) for s in per_endpoint.get(ep_id, {}).get("statuses", set())}
+        declared_total += len(declared)
+        observed_total += len(declared & seen)
+        missing = sorted(declared - seen)
+        if missing:
+            code_gaps.append({"endpointId": ep_id, "method": ep["method"], "path": ep["path"],
+                              "declared_but_unseen": missing, "observed": sorted(seen)})
+
+    # Business-level outcomes (only meaningful when the run had an envelope configured)
+    outcomes = Counter(r.get("outcome") for r in results.get("results", []) if r.get("outcome"))
+
     # Calculate overall coverage %
     total_endpoints = len(spec_endpoints)
     covered_endpoints = total_endpoints - len(untested)
     coverage_pct = round(covered_endpoints / total_endpoints * 100, 1) if total_endpoints else 0
+    code_pct = round(observed_total / declared_total * 100, 1) if declared_total else 0
 
     return {
         "version": "1.0",
@@ -85,9 +105,13 @@ def compute_coverage(spec: dict, results: dict) -> dict:
             "covered_endpoints": covered_endpoints,
             "untested_endpoints": len(untested),
             "endpoint_coverage_pct": coverage_pct,
+            "declared_response_codes": declared_total,
+            "observed_response_codes": observed_total,
+            "response_code_coverage_pct": code_pct,
             "total_cases": len(results.get("results", [])),
             "passed": sum(1 for r in results.get("results", []) if r["status"] == "passed"),
             "failed": sum(1 for r in results.get("results", []) if r["status"] != "passed"),
+            "server_errors": outcomes.get("server_error", 0),
         },
         "method_coverage": {
             "spec": dict(spec_methods),
@@ -96,12 +120,15 @@ def compute_coverage(spec: dict, results: dict) -> dict:
         },
         "category_coverage": dict(hit_categories),
         "status_coverage": {str(k): v for k, v in hit_status.items()},
+        "outcome_coverage": dict(outcomes),
+        "response_code_gaps": code_gaps,
         "untested_endpoints": [{"id": ep_id, "method": spec_endpoints[ep_id]["method"],
                                 "path": spec_endpoints[ep_id]["path"]}
                                for ep_id in untested],
         "per_endpoint": per_endpoint_out,
         "failures_by_endpoint": failures_by_ep,
     }
+
 
 
 def render_markdown(cov: dict) -> str:
@@ -111,9 +138,13 @@ def render_markdown(cov: dict) -> str:
         f"# API Test Coverage Report",
         "",
         f"**Endpoint coverage**: {s['covered_endpoints']}/{s['total_endpoints']} ({s['endpoint_coverage_pct']}%)",
+        f"**Response-code coverage**: {s['observed_response_codes']}/{s['declared_response_codes']} ({s['response_code_coverage_pct']}%)",
         f"**Cases**: {s['total_cases']} total, {s['passed']} passed, {s['failed']} failed",
         "",
     ]
+    if s["server_errors"]:
+        lines += [f"> ⚠️ {s['server_errors']} responses were server errors "
+                  f"(5xx, or an envelope code in the 5xx range).", ""]
 
     if cov["untested_endpoints"]:
         lines.append(f"## ❌ Untested Endpoints ({len(cov['untested_endpoints'])})")
@@ -128,7 +159,19 @@ def render_markdown(cov: dict) -> str:
             lines.append(f"- `{m}`: {n} endpoints have no test cases for this method")
         lines.append("")
 
+    if cov["response_code_gaps"]:
+        lines.append(f"## ⚠️ Declared Response Codes Never Observed ({len(cov['response_code_gaps'])} endpoints)")
+        lines.append("Reaching an endpoint is not the same as exercising its outcomes.")
+        lines.append("")
+        lines.append("| Endpoint | Declared but unseen | Observed |")
+        lines.append("|----------|---------------------|----------|")
+        for g in cov["response_code_gaps"]:
+            lines.append(f"| `{g['method']} {g['path']}` | {', '.join(g['declared_but_unseen'])} | "
+                         f"{', '.join(g['observed']) or '—'} |")
+        lines.append("")
+
     lines.append("## Per-Endpoint Breakdown")
+
     lines.append("| Endpoint | Cases | Pass | Fail | Categories | Statuses |")
     lines.append("|----------|-------|------|------|------------|----------|")
     for ep in cov["per_endpoint"]:
@@ -163,13 +206,17 @@ def main() -> None:
     results = json.loads(results_path.read_text(encoding="utf-8"))
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     cov = compute_coverage(spec, results)
+    s = cov["summary"]
 
     if args.json:
         print(json.dumps(cov, indent=2, ensure_ascii=False))
     else:
-        s = cov["summary"]
         print(f"Coverage: {s['endpoint_coverage_pct']}% ({s['covered_endpoints']}/{s['total_endpoints']} endpoints)", file=sys.stderr)
+        print(f"  response codes: {s['response_code_coverage_pct']}% ({s['observed_response_codes']}/{s['declared_response_codes']})", file=sys.stderr)
         print(f"  {len(cov['untested_endpoints'])} untested, {s['failed']} failures", file=sys.stderr)
+        if s["server_errors"]:
+            print(f"  {s['server_errors']} server errors", file=sys.stderr)
+
 
     if args.output:
         Path(args.output).write_text(render_markdown(cov), encoding="utf-8")

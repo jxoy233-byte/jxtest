@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
+from _common import parse_envelope_arg
+
 METHODS = {"get", "post", "put", "delete", "patch", "head", "options"}
 
 # URL patterns to strip from HAR paths (so /users/123 → /users/{id})
@@ -277,11 +279,27 @@ def parse_har(data: dict) -> dict:
     }
 
 
+def looks_enveloped(result: dict) -> bool:
+    """True when most 2xx response schemas wrap their payload in a code/message envelope."""
+    schemas = []
+    for ep in result.get("endpoints", []):
+        for status, resp in (ep.get("responses") or {}).items():
+            if str(status).startswith("2") and isinstance(resp.get("schema"), dict):
+                schemas.append(resp["schema"])
+    if len(schemas) < 3:
+        return False
+    wrapped = sum(1 for s in schemas
+                  if {"code", "message"} <= set((s.get("properties") or {}).keys()))
+    return wrapped / len(schemas) >= 0.8
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Parse API spec into unified api-spec.json")
     ap.add_argument("input", help="Input file (OpenAPI/Postman/HAR)")
     ap.add_argument("-o", "--output", default="api-spec.json", help="Output file")
     ap.add_argument("--format", choices=["openapi", "postman", "har"], help="Force format")
+    ap.add_argument("--envelope", help="Business-code envelope, e.g. 'code:0' or 'data.code:0,200'")
+    ap.add_argument("--auth", help="Auth config as JSON, or @path/to/auth.json")
     args = ap.parse_args()
 
     src = Path(args.input)
@@ -295,11 +313,32 @@ def main() -> None:
     parsers = {"openapi": parse_openapi, "postman": parse_postman, "har": parse_har}
     result = parsers[fmt](data)
 
+    if args.envelope:
+        try:
+            result["envelope"] = parse_envelope_arg(args.envelope)
+        except ValueError as e:
+            sys.exit(f"Error: --envelope: {e}")
+    if args.auth:
+        raw = Path(args.auth[1:]).read_text(encoding="utf-8") if args.auth.startswith("@") else args.auth
+        try:
+            result["auth"] = json.loads(raw)
+        except json.JSONDecodeError as e:
+            sys.exit(f"Error: --auth is not valid JSON: {e}")
+
     out = Path(args.output)
     out.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"OK  {len(result['endpoints'])} endpoints  {out}", file=sys.stderr)
     print(f"    baseUrl: {result['baseUrl']}", file=sys.stderr)
     print(f"    title:   {result['title']}", file=sys.stderr)
+    if result.get("envelope"):
+        env = result["envelope"]
+        print(f"    envelope: {env['codePath']} in {env['successValues']} = success", file=sys.stderr)
+    elif looks_enveloped(result):
+        # Don't guess the success value — a wrong one silently inverts every assertion.
+        print(f"    hint: responses look enveloped (code/message wrapper). Without "
+              f"--envelope 'code:0', business failures returned inside HTTP 200 will "
+              f"be reported as passing.", file=sys.stderr)
+
 
 
 if __name__ == "__main__":

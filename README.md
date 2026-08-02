@@ -1,6 +1,6 @@
 # jxtest
 
-**AI-driven API testing toolkit.** From any OpenAPI/Postman/HAR spec, one CLI (`jxtest <cmd>`) generates 7 categories of tests, runs functional/load/security suites, blocks breaking changes, finds coverage gaps, and self-heals failures. Replaces Postman for automated workflows; adds load testing, OWASP scanning, and AI-friendly analysis that Postman doesn't have.
+**AI-driven API testing toolkit.** From any OpenAPI/Postman/HAR spec, one CLI (`jxtest <cmd>`) generates 7 categories of tests, runs functional/load/security suites, blocks breaking changes, finds coverage gaps, and self-heals failures. Replaces Postman for automated workflows; adds load testing, OWASP scanning, envelope-aware assertions (HTTP 200 + `body.code` APIs), declarative login auth, and AI-friendly analysis that Postman doesn't have.
 
 > **For AI agents**: read [`SKILL.md`](./SKILL.md) — it's the canonical instruction manual for driving jxtest from an LLM.
 
@@ -58,13 +58,25 @@ jxtest --version    # 1.0
 ## Quick start
 
 ```bash
+# Plain REST API
 jxtest schema examples/petstore/openapi.yaml          # parse spec
 jxtest gen api-spec.json -o test-cases.json           # generate tests
 jxtest run test-cases.json --base-url https://api.dev.com   # run
 jxtest report test-results.json -o report.html        # HTML report
+
+# Enveloped API (HTTP 200 + body.code — FastAPI / Express / Spring common pattern)
+jxtest schema openapi.yaml --envelope 'code:0'        # parser prints hint if it looks enveloped
+jxtest gen api-spec.json                              # gen adds business_ok assertions
+jxtest run test-cases.json --base-url https://api.dev.com   # run with envelope awareness
 ```
 
 That's it. No virtualenv, no Docker, no Node.js, no GUI.
+
+## Highlights
+
+- **Envelope-aware assertions** — for APIs that wrap everything in HTTP 200 + business codes. `business_ok` / `business_not_ok` catch wrapped 5xx that plain status checks report as passing. One `--envelope 'code:0'` flag enables it end-to-end.
+- **Declarative login auth** — replace `--pre-script` token injection with `auth: {type: login, url, body, tokenPath}` in `test-cases.json`. Tokens are cached, refreshed automatically on 401, and survive long test suites.
+- **Coverage that catches lies** — endpoint coverage alone hides the "we hit it, never saw its 422" gap. Coverage now reports declared-but-unseen response codes and (under envelope) outcome distribution.
 
 ## What's in the box
 

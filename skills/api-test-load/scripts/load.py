@@ -336,7 +336,9 @@ def main() -> None:
         sys.exit("Error: base URL not set")
 
     scopes = load_env(args.env)
-    auth_headers = resolve_auth(data.get("auth"), scopes)
+    auth_headers = resolve_auth(data.get("auth"), scopes, base_url).headers()
+    if auth_headers.get("error"):
+        sys.exit(f"Error: auth failed: {auth_headers['error']}")
     defaults = data.get("defaults", {})
 
     # Scenarios

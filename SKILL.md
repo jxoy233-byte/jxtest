@@ -13,13 +13,13 @@ You are an AI agent with access to the `jxtest` CLI. Your job: take a spec + a b
 
 jxtest replaces Postman/Insomnia for AI-driven workflows. From an OpenAPI/Postman/HAR spec, it:
 
-1. **Parses** the spec into `api-spec.json`
-2. **Generates** 7 categories of test cases (positive / negative / boundary / security / enum / format / idempotency)
-3. **Runs** functional tests with **16+ assertions** (incl. `error_structure` for error contracts), OAuth2, env vars, data-driven, context passing
+1. **Parses** the spec into `api-spec.json` (auto-detects enveloped APIs)
+2. **Generates** 7 categories of test cases (positive / negative / boundary / security / enum / format / idempotency), with envelope-aware assertions
+3. **Runs** functional tests with **20+ assertions** (incl. `business_ok` / `business_not_ok` for enveloped APIs, `error_structure` for error contracts), OAuth2 / login, env vars, data-driven, context passing
 4. **Loads** under concurrent VUs with **AI-friendly analysis** (bottlenecks, slow requests, error breakdown, recommendations) + SLA + baseline
-5. **Scans** for OWASP API Top 10 vulnerabilities (IDOR, broken auth, SSRF, PII exposure)
+5. **Scans** for OWASP API Top 10 vulnerabilities (IDOR, broken auth, SSRF, PII exposure) — envelope-aware so real bugs don't masquerade as findings
 6. **Diffs** two specs to detect breaking changes
-7. **Reports coverage gaps** (endpoints/methods/categories not tested)
+7. **Reports coverage gaps** (endpoints / methods / categories / declared response codes / business outcomes)
 8. **Heals** failed assertions via heuristic + LLM
 9. **Reports** HTML + JUnit XML + Markdown
 
@@ -46,8 +46,8 @@ jxtest replaces Postman/Insomnia for AI-driven workflows. From an OpenAPI/Postma
 ## Standard workflow (run these in order)
 
 ```bash
-# 1. Parse spec
-jxtest schema openapi.yaml
+# 1. Parse spec (add --envelope if the API returns HTTP 200 for everything)
+jxtest schema openapi.yaml --envelope 'code:0'
 
 # 2. Generate cases
 jxtest gen api-spec.json -o test-cases.json
@@ -178,6 +178,54 @@ In `test-cases.json`:
 
 Expands to 3 variants: `create_user#0`, `#1`, `#2`.
 
+### Pattern 8: Enveloped API (HTTP 200 + body.code)
+
+Many APIs return HTTP 200 for everything and put the real status in `body.code`. Without configuration, `business_ok` / `business_not_ok` assertions silently degrade to pure HTTP-status checks and miss every wrapped failure.
+
+```bash
+# 1. Tell the parser about the envelope. Format: codePath:successValue[,successValue...]
+jxtest schema openapi.yaml --envelope 'code:0' -o api-spec.json
+# Hint: parser auto-suggests --envelope if ≥80% of 2xx schemas wrap a code/message pair.
+
+# 2. From then on, the envelope config flows through every command automatically.
+jxtest gen api-spec.json
+jxtest run test-cases.json --base-url https://api.dev.com
+# Stderr will print: "Envelope: code in [0] = success"
+
+# Override per-run if needed:
+jxtest run test-cases.json --envelope 'data.code:0,200'
+```
+
+### Pattern 9: Login flow without pre-scripts
+
+Replace the old `--pre-script` hack with a declarative login block. Token is fetched once, cached, and refreshed automatically on 401.
+
+```json
+{
+  "auth": {
+    "type": "login",
+    "url": "/auth/login",
+    "method": "POST",
+    "body": {"username": "{{USER}}", "password": "{{PASS}}"},
+    "tokenPath": "data.access_token",
+    "scheme": "Bearer",
+    "header": "Authorization"
+  },
+  "cases": [
+    {"id": "list_items", "method": "GET", "path": "/items",
+     "assertions": [{"type": "business_ok"}]}
+  ]
+}
+```
+
+```bash
+jxtest env set local USER admin
+jxtest env set local PASS secret
+jxtest run test-cases.json --env local
+```
+
+Long-running suites get a transparent token refresh: when an access token expires mid-run, `run` calls `auth.refresh()` and retries once. No user action needed.
+
 ## Important rules (read these)
 
 1. **Stdlib-only Python** — no `requests`, no third-party deps. Only `pyyaml` for YAML OpenAPI specs.
@@ -189,6 +237,7 @@ Expands to 3 variants: `create_user#0`, `#1`, `#2`.
 7. **Cross-platform** — works on macOS / Linux / Windows. On Windows, if `jxtest` isn't on PATH, use `python bin\jxtest` instead. If a user is on Windows and `jxtest` fails with "command not found", suggest `python bin\jxtest <cmd>` or installing Python's Scripts directory to PATH.
 8. **No virtualenv needed** — jxtest is a CLI tool, not a library. `pip install pyyaml` is the only install step.
 9. **`make` is optional** — only Unix. On Windows, skip Makefile targets and invoke scripts directly.
+10. **Enveloped APIs need explicit configuration** — `business_ok` / `business_not_ok` silently degrade to HTTP status checks if `envelope` isn't set. If the user mentions "always returns 200", "code in body", "business status", "wrapped response", or similar, run `jxtest schema` with `--envelope` before generating.
 
 ## When NOT to use jxtest
 

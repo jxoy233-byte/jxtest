@@ -10,39 +10,24 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
+from xml.sax.saxutils import escape, quoteattr
 
-from _common import build_url, execute, resolve_auth, deep_resolve, load_env, apply_defaults, find_unresolved
+from _common import (build_url, execute, resolve_auth, deep_resolve, load_env, apply_defaults,
+                     find_unresolved, get_json_path, load_envelope, parse_envelope_arg,
+                     classify, describe, business_code)
+
+PROFILES = {
+    "smoke": "positive,boundary",
+    "full": "positive,negative,boundary,security,enum,format,idempotency",
+}
 
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def get_json_path(data, path: str):
-    """Resolve dotted JSON path with optional [N] indexing. Accepts '$.a.b' or 'a.b'."""
-    cur = data
-    # Strip leading "$." or "$" prefix
-    clean = re.sub(r"^\$", "", path)
-    for part in re.split(r"\.(?![^\[]*\])", clean):
-        if not part:
-            continue
-        if "[" in part:
-            m = re.match(r"(\w*)\[(\d+)\]", part)
-            if not m:
-                return None
-            key, idx = m.groups()
-            if key:
-                cur = cur.get(key, []) if isinstance(cur, dict) else []
-            cur = cur[int(idx)] if isinstance(cur, list) and int(idx) < len(cur) else None
-        else:
-            if isinstance(cur, dict):
-                cur = cur.get(part)
-            else:
-                return None
-    return cur
 
-
-def run_assertion(assertion: dict, response: dict, spec: dict | None) -> dict:
+def run_assertion(assertion: dict, response: dict, spec: dict | None, envelope: dict | None = None) -> dict:
     t = assertion["type"]
     if response.get("networkError"):
         return {**assertion, "passed": False, "skipped": "network_error"}
@@ -82,7 +67,19 @@ def run_assertion(assertion: dict, response: dict, spec: dict | None) -> dict:
         return {**assertion, "actual": size, "passed": ok}
     if t == "no_reflected_payload":
         return {**assertion, "passed": assertion["payload"] not in (response.get("body") or "")}
-    if t in ("json_path", "json_path_exists", "json_path_type"):
+    if t in ("business_ok", "business_not_ok"):
+        # Envelope-aware outcome. Without an `envelope` config this degrades to
+        # plain HTTP status checking, so the same case works on any API.
+        outcome = classify(response, envelope)
+        if t == "business_ok":
+            passed = outcome == "ok"
+        else:
+            # A negative case is only satisfied by a clean rejection. A 5xx (or an
+            # envelope code in the 5xx range) means missing input validation, not
+            # a correctly refused request — that must fail loudly.
+            passed = outcome == "rejected"
+        return {**assertion, "actual": describe(response, envelope), "outcome": outcome, "passed": passed}
+    if t in ("json_path", "json_path_exists", "json_path_type", "json_path_in", "json_path_not_in"):
         try:
             data = json.loads(response.get("body") or "{}")
         except json.JSONDecodeError:
@@ -94,6 +91,10 @@ def run_assertion(assertion: dict, response: dict, spec: dict | None) -> dict:
             return {**assertion, "actual": val, "passed": val is not None}
         if t == "json_path_type":
             return {**assertion, "actual": type(val).__name__, "passed": type(val).__name__ == assertion.get("type_")}
+        if t == "json_path_in":
+            return {**assertion, "actual": val, "passed": val in assertion["expected"]}
+        if t == "json_path_not_in":
+            return {**assertion, "actual": val, "passed": val not in assertion["expected"]}
     if t == "schema_matches" and spec:
         status = str(response.get("status", 0))
         schema = (spec.get("responses", {}).get(status, {}).get("schema") or {})
@@ -174,7 +175,7 @@ def expand_data_driven(cases: list[dict]) -> list[dict]:
     return expanded
 
 
-def run_one(case: dict, base_url: str, auth_headers: dict, timeout: float, scopes: list[dict], pre_hook, spec: dict, defaults: dict, context: dict | None = None) -> dict:
+def run_one(case: dict, base_url: str, auth, timeout: float, scopes: list[dict], pre_hook, spec: dict, defaults: dict, context: dict | None = None, envelope: dict | None = None) -> dict:
     # Default category for hand-written cases that omit it
     cat = case.get("category") or "positive"
     # Merge defaults first, then resolve vars
@@ -188,21 +189,25 @@ def run_one(case: dict, base_url: str, auth_headers: dict, timeout: float, scope
         return {"caseId": case["id"], "endpointId": case.get("endpointId", ""), "category": cat,
                 "status": "error", "failureClass": "config_error",
                 "error": f"unresolved variables: {', '.join(unresolved[:3])}"}
+    auth_headers = auth.headers()
     if auth_headers.get("error"):
         return {"caseId": case["id"], "endpointId": case.get("endpointId", ""), "category": cat,
                 "status": "error", "failureClass": "config_error", "error": auth_headers["error"]}
 
-    # Pre-request hook
-    ctx = {"case": resolved_case, "headers": resolved_case.get("headers", {}), "context": context or {}}
+    # Pre-request hook. Auth is merged in *before* the hook runs and ctx["headers"]
+    # is the dict actually sent, so a script can add, override or drop any header.
+    # Case headers outrank auth so that an auth_required case sending an empty
+    # Authorization header is not silently handed the real token.
+    headers = {**auth_headers, **resolved_case.get("headers", {})}
+    ctx = {"case": resolved_case, "headers": headers, "context": context or {}}
     try:
         pre_hook(ctx)
     except Exception as e:
         return {"caseId": case["id"], "endpointId": case.get("endpointId", ""), "category": cat,
                 "status": "error", "failureClass": "config_error", "error": f"pre-script: {e}"}
+    headers = dict(ctx["headers"])
 
     url = build_url(base_url, resolved_case["path"], resolved_case.get("query"))
-    headers = dict(resolved_case.get("headers", {}))
-    headers.update(auth_headers)
     resp = execute(url, resolved_case["method"], headers, resolved_case.get("body"), timeout)
     if resp.get("networkError"):
         # Retry once
@@ -212,18 +217,25 @@ def run_one(case: dict, base_url: str, auth_headers: dict, timeout: float, scope
             return {"caseId": case["id"], "endpointId": case.get("endpointId", ""), "category": cat,
                     "status": "error", "failureClass": "network_error", "error": resp.get("error"),
                     "request": {"method": resolved_case["method"], "url": url}}
+    # Access tokens expire mid-run; re-authenticate once and retry.
+    elif resp.get("status") == 401 and auth.refreshable and cat != "security":
+        refreshed = auth.refresh()
+        if not refreshed.get("error"):
+            headers.update(refreshed)
+            resp = execute(url, resolved_case["method"], headers, resolved_case.get("body"), timeout)
 
     is_network = resp.get("networkError", False)
-    assertion_results = [run_assertion(a, resp, spec) for a in resolved_case.get("assertions", [])]
+    assertion_results = [run_assertion(a, resp, spec, envelope) for a in resolved_case.get("assertions", [])]
     all_passed = all(a["passed"] for a in assertion_results)
     passed = not is_network and all_passed
+    outcome = classify(resp, envelope)
     if passed:
         failure = "ok"
     elif is_network:
         failure = "network_error"
     else:
-        status = resp.get("status", 0)
-        failure = "server_error" if 500 <= status < 600 else "assertion_failed"
+        failure = "server_error" if outcome == "server_error" else "assertion_failed"
+
 
     # Extract context for subsequent cases (only if passed; otherwise extracted None would pollute)
     extracted: dict = {}
@@ -237,6 +249,7 @@ def run_one(case: dict, base_url: str, auth_headers: dict, timeout: float, scope
 
     return {"caseId": case["id"], "endpointId": case.get("endpointId", ""), "category": cat,
             "status": "passed" if passed else "failed", "httpStatus": resp.get("status"),
+            "outcome": outcome, "businessCode": business_code(resp, envelope),
             "durationMs": resp.get("durationMs"), "failureClass": None if passed else failure,
             "error": resp.get("error"),
             "request": {"method": resolved_case["method"], "url": url},
@@ -246,19 +259,22 @@ def run_one(case: dict, base_url: str, auth_headers: dict, timeout: float, scope
 
 
 def write_junit(results: list[dict], path: str, duration_ms: int) -> None:
-    n_pass = sum(1 for r in results if r["status"] == "passed")
     n_fail = sum(1 for r in results if r["status"] == "failed")
     n_err = sum(1 for r in results if r["status"] == "error")
     suite_attrs = f'tests="{len(results)}" failures="{n_fail}" errors="{n_err}" time="{duration_ms/1000:.3f}"'
     cases = []
     for r in results:
         sec = (r.get("durationMs") or 0) / 1000
+        cls, name = quoteattr(r["category"]), quoteattr(r["caseId"])
         if r["status"] == "passed":
-            cases.append(f'  <testcase classname="{r["category"]}" name="{r["caseId"]}" time="{sec:.3f}"/>')
+            cases.append(f'  <testcase classname={cls} name={name} time="{sec:.3f}"/>')
         else:
-            msg = r.get("error") or r.get("failureClass") or "failed"
-            cases.append(f'  <testcase classname="{r["category"]}" name="{r["caseId"]}" time="{sec:.3f}">\n    <failure message="{msg}">{r["caseId"]} - {msg}</failure>\n  </testcase>')
+            msg = str(r.get("error") or r.get("failureClass") or "failed")
+            cases.append(f'  <testcase classname={cls} name={name} time="{sec:.3f}">\n'
+                         f'    <failure message={quoteattr(msg)}>{escape(r["caseId"])} - {escape(msg)}</failure>\n'
+                         f'  </testcase>')
     Path(path).write_text(f'<?xml version="1.0"?>\n<testsuite {suite_attrs}>\n' + "\n".join(cases) + "\n</testsuite>\n", encoding="utf-8")
+
 
 
 def main() -> None:
@@ -269,9 +285,11 @@ def main() -> None:
     ap.add_argument("--base-url", default=os.environ.get("API_BASE_URL", ""))
     ap.add_argument("--parallel", "-p", type=int, default=4)
     ap.add_argument("--timeout", type=float, default=10.0)
-    ap.add_argument("--filter", help="Run only cases whose category matches")
+    ap.add_argument("--filter", help="Run only these categories (comma-separated)")
+    ap.add_argument("--profile", choices=sorted(PROFILES), help="Category preset: smoke | full")
     ap.add_argument("--pre-script", help="Python file with pre(case) hook")
     ap.add_argument("--spec", help="api-spec.json for schema validation")
+    ap.add_argument("--envelope", help="Business-code envelope, e.g. 'code:0' (overrides test-cases.json)")
     ap.add_argument("--junit", action="store_true", help="Also write JUnit XML")
     ap.add_argument("--junit-output", default="test-results.xml")
     ap.add_argument("--config", help="jxtest.config.json (CLI args override)")
@@ -296,19 +314,28 @@ def main() -> None:
     if not base_url:
         sys.exit("Error: base URL not set (use --base-url or API_BASE_URL)")
 
-    auth_headers = resolve_auth(data.get("auth"), scopes)
-    if "error" in auth_headers:
-        print(f"Auth warning: {auth_headers['error']}", file=sys.stderr)
+    auth = resolve_auth(data.get("auth"), scopes, base_url)
+    auth_error = auth.headers().get("error")
+    if auth_error:
+        print(f"Auth warning: {auth_error}", file=sys.stderr)
 
     spec = {}
     if args.spec and Path(args.spec).exists():
         spec = json.loads(Path(args.spec).read_text(encoding="utf-8"))
 
+    # Envelope: CLI > test-cases.json > api-spec.json
+    envelope = parse_envelope_arg(args.envelope) if args.envelope else (load_envelope(data) or load_envelope(spec))
+    if envelope:
+        print(f"Envelope: {envelope['codePath']} in {envelope['successValues']} = success", file=sys.stderr)
+
     pre_hook = load_pre_script(args.pre_script)
     defaults = data.get("defaults", {})
     cases = data.get("cases", [])
-    if args.filter:
-        cases = [c for c in cases if c.get("category") == args.filter]
+    selected = args.filter or (PROFILES[args.profile] if args.profile else None)
+    if selected:
+        wanted = {c.strip() for c in selected.split(",") if c.strip()}
+        cases = [c for c in cases if (c.get("category") or "positive") in wanted]
+
 
     # Expand data-driven: each `data` row becomes its own case variant
     cases = expand_data_driven(cases)
@@ -326,8 +353,8 @@ def main() -> None:
 
     def run_sequential(case):
         nonlocal context
-        result = run_one(case, base_url, auth_headers, args.timeout, scopes,
-                         pre_hook, spec, defaults, context=context)
+        result = run_one(case, base_url, auth, args.timeout, scopes,
+                         pre_hook, spec, defaults, context=context, envelope=envelope)
         # Only update context if extraction succeeded (not None)
         if result.get("extracted"):
             for k, v in result["extracted"].items():
@@ -340,7 +367,7 @@ def main() -> None:
             results.append(run_sequential(c))
     else:
         with ThreadPoolExecutor(max_workers=parallel) as ex:
-            futures = {ex.submit(run_one, c, base_url, auth_headers, args.timeout, scopes, pre_hook, spec, defaults): c for c in cases}
+            futures = {ex.submit(run_one, c, base_url, auth, args.timeout, scopes, pre_hook, spec, defaults, None, envelope): c for c in cases}
             for fut in as_completed(futures):
                 results.append(fut.result())
     duration_ms = int((time.perf_counter() - t0) * 1000)
@@ -348,10 +375,13 @@ def main() -> None:
     passed = sum(1 for r in results if r["status"] == "passed")
     failed = sum(1 for r in results if r["status"] == "failed")
     errors = sum(1 for r in results if r["status"] == "error")
+    server_errors = sum(1 for r in results if r.get("outcome") == "server_error")
 
     out = {"version": "1.0", "startedAt": started_iso, "endedAt": now_iso(),
            "durationMs": duration_ms, "baseUrl": base_url, "env": args.env,
-           "summary": {"total": len(results), "passed": passed, "failed": failed, "errors": errors},
+           "envelope": envelope,
+           "summary": {"total": len(results), "passed": passed, "failed": failed,
+                       "errors": errors, "serverErrors": server_errors},
            "results": results}
     Path(args.output).write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
     if args.junit:
@@ -360,8 +390,11 @@ def main() -> None:
     s = out["summary"]
     print(f"OK  {s['total']} cases  {s['passed']} passed  {s['failed']} failed  {s['errors']} errors  {args.output}", file=sys.stderr)
     print(f"    duration: {duration_ms}ms  env: {args.env or '-'}", file=sys.stderr)
+    if server_errors:
+        print(f"    server errors: {server_errors} (5xx or envelope code in the 5xx range)", file=sys.stderr)
     if args.junit:
         print(f"    junit: {args.junit_output}", file=sys.stderr)
+
 
 
 if __name__ == "__main__":

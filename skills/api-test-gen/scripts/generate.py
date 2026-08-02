@@ -6,10 +6,35 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# Returned by _fill_body when an endpoint declares a body but gives no schema and
+# no example. Guessing a body for those produces cases that fail for reasons that
+# have nothing to do with the endpoint, so they get demoted instead.
+NO_SCHEMA = object()
 
-def gen_positive(endpoint: dict) -> dict:
-    """Generate happy-path case."""
-    return _make_case(endpoint, id_suffix="positive", name_suffix="happy path", category="positive")
+
+def has_unusable_body(endpoint: dict) -> bool:
+    """True when the endpoint takes a body but the spec says nothing about its shape."""
+    return _fill_body(endpoint) is NO_SCHEMA
+
+
+def gen_positive(endpoint: dict) -> list[dict]:
+    """Happy-path case. Schema-less bodies get a 'must be rejected' case instead."""
+    if has_unusable_body(endpoint):
+        return [{
+            "id": f"{endpoint['id']}_negative_empty_body",
+            "endpointId": endpoint["id"],
+            "name": f"{endpoint['method']} {endpoint['path']} - empty body must be rejected",
+            "category": "negative",
+            "method": endpoint["method"],
+            "path": _resolve_path(endpoint["path"], _fill_params(endpoint)[1]),
+            "headers": {"Content-Type": "application/json"},
+            "query": {},
+            "body": {},
+            "assertions": [{"type": "business_not_ok"}],
+            "note": "spec declares no request body schema — add one to generate a happy-path case",
+        }]
+    return [_make_case(endpoint, id_suffix="positive", name_suffix="happy path", category="positive")]
+
 
 
 def _make_case(endpoint: dict, id_suffix: str, name_suffix: str, category: str,
@@ -30,12 +55,16 @@ def _make_case(endpoint: dict, id_suffix: str, name_suffix: str, category: str,
         "path": _resolve_path(endpoint["path"], path_params),
         "headers": headers,
         "query": query,
-        "body": body_override if body_override is not None else _fill_body(endpoint, mode="valid"),
+        "body": body_override if body_override is not None else _body_or_none(endpoint),
         "assertions": [
             {"type": "status", "expected": _success_status(endpoint)},
+            # Catches enveloped failures (HTTP 200 wrapping code:500) that a bare
+            # status check reports as passing.
+            {"type": "business_ok"},
             {"type": "response_time_ms", "lt": 2000},
         ],
     }
+
 
 
 def gen_missing_required(endpoint: dict) -> list[dict]:
@@ -63,7 +92,7 @@ def gen_missing_required(endpoint: dict) -> list[dict]:
                 "headers": {},
                 "query": q,
                 "body": None,
-                "assertions": [{"type": "status_in", "expected": [400, 422]}],
+                "assertions": [{"type": "business_not_ok"}],
             })
 
     if body_required:
@@ -80,9 +109,10 @@ def gen_missing_required(endpoint: dict) -> list[dict]:
             "headers": {"Content-Type": "application/json"},
             "query": {},
             "body": body_data,
-            "assertions": [{"type": "status_in", "expected": [400, 422]}],
+            "assertions": [{"type": "business_not_ok"}],
         })
     return cases
+
 
 
 def gen_boundary(endpoint: dict) -> list[dict]:
@@ -159,11 +189,12 @@ def gen_security(endpoint: dict) -> list[dict]:
                 "query": {} if p["in"] == "path" else {p["name"]: payload},
                 "body": None,
                 "assertions": [
-                    {"type": "status_in", "expected": [400, 404, 422]},
+                    {"type": "business_not_ok"},
                     {"type": "no_reflected_payload", "payload": payload},
                 ],
             })
     return cases
+
 
 
 def gen_enum_coverage(endpoint: dict) -> list[dict]:
@@ -206,19 +237,24 @@ def gen_idempotency(endpoint: dict) -> list[dict]:
     """For POST/PUT, send same body twice → expect same status (idempotent)."""
     if endpoint["method"] not in ("POST", "PUT", "PATCH") or not endpoint.get("requestBody"):
         return []
-    pos = gen_positive(endpoint)
+    if has_unusable_body(endpoint):
+        return []
+    pos = gen_positive(endpoint)[0]
     pos["id"] = f"{endpoint['id']}_idempotency"
     pos["name"] = f"{endpoint['method']} {endpoint['path']} - idempotent (2x same body)"
     pos["category"] = "idempotency"
-    pos["assertions"] = [{"type": "status", "expected": _success_status(endpoint)}]
+    pos["assertions"] = [{"type": "status", "expected": _success_status(endpoint)}, {"type": "business_ok"}]
     return [pos]
 
 
-def gen_auth_required(endpoint: dict) -> list[dict]:
+def gen_auth_required(endpoint: dict, envelope: dict | None = None) -> list[dict]:
     """Strip Authorization header → expect 401 or 403 (only when spec has security)."""
     if not endpoint.get("security"):
         return []
     query, path_params, _ = _fill_params(endpoint, mode="valid")
+    # Enveloped APIs answer HTTP 200 with the real code in the body, so a status
+    # check would never hold; fall back to the business-level outcome there.
+    assertion = {"type": "business_not_ok"} if envelope else {"type": "status_in", "expected": [401, 403]}
     return [{
         "id": f"{endpoint['id']}_auth_required",
         "endpointId": endpoint["id"],
@@ -229,8 +265,9 @@ def gen_auth_required(endpoint: dict) -> list[dict]:
         "headers": {"Authorization": ""},
         "query": query,
         "body": None,
-        "assertions": [{"type": "status_in", "expected": [401, 403]}],
+        "assertions": [assertion],
     }]
+
 
 
 def _success_status(endpoint: dict) -> int:
@@ -276,8 +313,14 @@ def _fill_body(endpoint: dict, mode: str = "valid") -> Any:
         return ex
     schema = body.get("schema")
     if not schema:
-        return {}
+        return NO_SCHEMA
     return _schema_example(schema)
+
+
+def _body_or_none(endpoint: dict) -> Any:
+    body = _fill_body(endpoint)
+    return None if body is NO_SCHEMA else body
+
 
 
 def _schema_example(schema: dict) -> Any:
@@ -357,15 +400,18 @@ def _example_for(t: str, fmt: str | None = None, name: str = "") -> Any:
 
 
 def auto_auth(spec: dict) -> dict | None:
-    """Detect auth from spec security."""
+    """Use the spec's own auth block if present, else infer from endpoint security."""
+    if isinstance(spec.get("auth"), dict):
+        return spec["auth"]
     for sec in spec.get("endpoints", [{}])[0].get("security", []):
         if "bearerAuth" in sec or "BearerAuth" in sec:
-            return {"type": "bearer", "token": "${TOKEN}"}
+            return {"type": "bearer", "token": "{{TOKEN}}"}
         if "apiKey" in sec or "ApiKey" in sec:
-            return {"type": "api_key", "key_name": "X-API-Key", "value": "${API_KEY}"}
+            return {"type": "api_key", "key_name": "X-API-Key", "value": "{{API_KEY}}"}
         if "basicAuth" in sec or "BasicAuth" in sec:
-            return {"type": "basic", "username": "${USER}", "password": "${PASS}"}
+            return {"type": "basic", "username": "{{BASIC_USER}}", "password": "{{BASIC_PASS}}"}
     return None
+
 
 
 def main() -> None:
@@ -387,10 +433,14 @@ def main() -> None:
     if args.smoke:
         # Smoke: just positive cases + 1 boundary per endpoint (faster CI)
         cats = {"positive", "boundary"}
+    envelope = spec.get("envelope")
     cases: list[dict] = []
+    schema_less: list[str] = []
     for ep in spec.get("endpoints", []):
+        if has_unusable_body(ep):
+            schema_less.append(f"{ep['method']} {ep['path']}")
         if "positive" in cats:
-            cases.append(gen_positive(ep))
+            cases.extend(gen_positive(ep))
         if "negative" in cats:
             cases.extend(gen_missing_required(ep))
         if "boundary" in cats:
@@ -401,7 +451,7 @@ def main() -> None:
             cases.extend(bc)
         if "security" in cats:
             cases.extend(gen_security(ep))
-            cases.extend(gen_auth_required(ep))
+            cases.extend(gen_auth_required(ep, envelope))
         if "enum" in cats:
             cases.extend(gen_enum_coverage(ep))
         if "format" in cats:
@@ -413,6 +463,7 @@ def main() -> None:
         "version": "1.0",
         "baseUrl": spec.get("baseUrl", ""),
         "auth": auto_auth(spec),
+        "envelope": envelope,
         "defaults": {
             "headers": {
                 "User-Agent": "jxtest/1.0",
@@ -426,12 +477,22 @@ def main() -> None:
     print(f"OK  {len(cases)} cases  {args.output}", file=sys.stderr)
     print(f"    baseUrl: {out['baseUrl']}", file=sys.stderr)
     print(f"    auth:    {out['auth']}", file=sys.stderr)
+    if envelope:
+        print(f"    envelope: {envelope['codePath']} in {envelope.get('successValues')} = success", file=sys.stderr)
     print(f"    defaults: User-Agent + Accept", file=sys.stderr)
     by_cat: dict[str, int] = {}
     for c in cases:
         by_cat[c["category"]] = by_cat.get(c["category"], 0) + 1
     for cat, n in sorted(by_cat.items()):
         print(f"    {cat}: {n}", file=sys.stderr)
+    if schema_less:
+        print(f"    no happy path for {len(schema_less)} endpoints (schema-less requestBody — "
+              f"add a schema to cover them):", file=sys.stderr)
+        for ep in schema_less[:5]:
+            print(f"      {ep}", file=sys.stderr)
+        if len(schema_less) > 5:
+            print(f"      ... and {len(schema_less) - 5} more", file=sys.stderr)
+
 
 
 if __name__ == "__main__":
