@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""jxtest — unified CLI for AI-native API testing."""
+import runpy
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+SKILLS = ROOT / "skills"
+
+# Map short commands → (skill_dir, script.py)
+CMDS = {
+    "schema":   ("api-test-schema", "parse.py"),
+    "gen":      ("api-test-gen",    "generate.py"),
+    "validate": ("api-test-gen",    "validate.py"),
+    "env":      ("api-test-env",    "env.py"),
+    "mock":     ("api-test-mock",   "mock.py"),
+    "run":      ("api-test-run",    "run.py"),
+    "load":     ("api-test-load",   "load.py"),
+    "heal":     ("api-test-heal",   "heal.py"),
+    "report":   ("api-test-report", "report.py"),
+    "doc":      ("api-test-doc",    "doc.py"),
+    "security": ("api-test-security", "security.py"),
+    "diff":     ("api-test-diff",   "diff.py"),
+    "coverage": ("api-test-coverage", "coverage.py"),
+}
+
+HELP = """jxtest — AI-native API testing toolkit
+
+Usage:
+  jxtest <command> [args...]
+
+Commands:
+  schema    Parse OpenAPI/Postman/HAR → api-spec.json
+  gen       Generate test cases from spec (with defaults)
+  validate  Validate test-cases.json structure
+  env       Manage environments (list/show/create/set/resolve)
+  mock      Run mock server from spec (stateful)
+  run       Run functional tests (data-driven/context/OAuth2/15+ assertions/JUnit)
+  load      Run load/stress tests (VUs/SLA/baseline regression/p50-p99)
+  heal      Self-heal failed assertions via LLM
+  security  Run OWASP API Top 10 probes (IDOR/auth/SSRF/PII/sensitive data)
+  diff      Compare two api-spec.json → breaking changes + migration guide
+  coverage  Analyze test-results.json vs api-spec.json → coverage gaps
+  report    Generate HTML report
+  doc       Generate Markdown API docs
+
+Examples:
+  jxtest schema openapi.yaml
+  jxtest gen api-spec.json -o test-cases.json
+  jxtest run test-cases.json --env dev -o results.json
+  jxtest load test-cases.json --vus 50 --duration 30s --sla 'p95<500,errors<1%'
+  jxtest security api-spec.json --base-url https://api.example.com
+  jxtest diff old-spec.json new-spec.json -o migration.md
+  jxtest heal results.json --cases test-cases.json
+
+Each command forwards all args to the underlying skill script.
+Use `jxtest <command> --help` for command-specific options.
+"""
+
+
+def main() -> None:
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help"):
+        print(HELP)
+        sys.exit(0)
+    if sys.argv[1] in ("-V", "--version"):
+        print("jxtest 1.0")
+        sys.exit(0)
+
+    cmd = sys.argv[1]
+    if cmd not in CMDS:
+        print(f"jxtest: unknown command '{cmd}'", file=sys.stderr)
+        print(f"run 'jxtest --help' for the list", file=sys.stderr)
+        sys.exit(2)
+
+    skill_dir, script = CMDS[cmd]
+    script_path = SKILLS / skill_dir / "scripts" / script
+    if not script_path.exists():
+        print(f"jxtest: missing script: {script_path}", file=sys.stderr)
+        sys.exit(1)
+
+    # Forward argv to the skill script and run it in-process
+    sys.path.insert(0, str(SKILLS))  # so `from _common import ...` works
+    sys.argv = [str(script_path), *sys.argv[2:]]
+    runpy.run_path(str(script_path), run_name="__main__")
+
+
+if __name__ == "__main__":
+    main()

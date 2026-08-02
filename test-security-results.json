@@ -1,0 +1,106 @@
+{
+  "version": "1.0",
+  "baseUrl": "https://jsonplaceholder.typicode.com",
+  "summary": {
+    "total_probes": 4,
+    "vulnerabilities": 2,
+    "by_severity": {
+      "high": 2
+    },
+    "by_attack": {
+      "sensitive_data": 2
+    }
+  },
+  "findings": [
+    {
+      "endpointId": "GET_/pets",
+      "caseId": "GET_/pets_sec_sensitive_data",
+      "securityType": "sensitive_data",
+      "severity": "high",
+      "vulnerable": true,
+      "evidence": "Got HTTP 404, expected safe response",
+      "description": "Sensitive data exposure: response contains PII patterns"
+    },
+    {
+      "endpointId": "GET_/pets/{id}",
+      "caseId": "GET_/pets/{id}_sec_sensitive_data",
+      "securityType": "sensitive_data",
+      "severity": "high",
+      "vulnerable": true,
+      "evidence": "Got HTTP 404, expected safe response",
+      "description": "Sensitive data exposure: response contains PII patterns"
+    }
+  ],
+  "raw": [
+    {
+      "caseId": "GET_/pets_sec_sensitive_data",
+      "endpointId": "GET_/pets",
+      "securityType": "sensitive_data",
+      "status": "failed",
+      "httpStatus": 404,
+      "body": "{}",
+      "assertions": [
+        {
+          "type": "status",
+          "expected": 200,
+          "actual": 404,
+          "passed": false
+        }
+      ]
+    },
+    {
+      "caseId": "GET_/pets/{id}_sec_idor",
+      "endpointId": "GET_/pets/{id}",
+      "securityType": "idor",
+      "status": "passed",
+      "httpStatus": 404,
+      "body": "{}",
+      "assertions": [
+        {
+          "type": "status_in",
+          "expected": [
+            403,
+            404
+          ],
+          "actual": 404,
+          "passed": true
+        }
+      ]
+    },
+    {
+      "caseId": "GET_/pets/{id}_sec_sensitive_data",
+      "endpointId": "GET_/pets/{id}",
+      "securityType": "sensitive_data",
+      "status": "failed",
+      "httpStatus": 404,
+      "body": "{}",
+      "assertions": [
+        {
+          "type": "status",
+          "expected": 200,
+          "actual": 404,
+          "passed": false
+        }
+      ]
+    },
+    {
+      "caseId": "DELETE_/pets/{id}_sec_idor",
+      "endpointId": "DELETE_/pets/{id}",
+      "securityType": "idor",
+      "status": "passed",
+      "httpStatus": 404,
+      "body": "{}",
+      "assertions": [
+        {
+          "type": "status_in",
+          "expected": [
+            403,
+            404
+          ],
+          "actual": 404,
+          "passed": true
+        }
+      ]
+    }
+  ]
+}

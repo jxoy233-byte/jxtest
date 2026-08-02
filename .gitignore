@@ -1,0 +1,27 @@
+# Generated artifacts
+api-spec.json
+test-cases.json
+test-results.json
+test-results.xml
+test-heal-report.json
+report.html
+docs.md
+test-cases.json.bak
+responses/
+
+# Environment files (real secrets)
+env/
+*.local.json
+.global.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store

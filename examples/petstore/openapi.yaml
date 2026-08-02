@@ -1,0 +1,76 @@
+openapi: 3.0.0
+info:
+  title: Pet Store
+  version: 1.0.0
+  description: A minimal pet store API for testing.
+servers:
+  - url: https://api.petstore.com/v1
+paths:
+  /pets:
+    get:
+      summary: List pets
+      tags: [pets]
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            example: 10
+      responses:
+        '200':
+          description: A list of pets
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: {type: string}
+                    name: {type: string}
+    post:
+      summary: Create a pet
+      tags: [pets]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: {type: string, example: "Fluffy"}
+                tag: {type: string, example: "cat"}
+      responses:
+        '201':
+          description: Created
+        '400':
+          description: Invalid input
+  /pets/{id}:
+    get:
+      summary: Get pet by ID
+      tags: [pets]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: OK
+        '404':
+          description: Pet not found
+    delete:
+      summary: Delete pet
+      tags: [pets]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '204':
+          description: Deleted
+        '404':
+          description: Pet not found

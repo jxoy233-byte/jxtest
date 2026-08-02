@@ -1,0 +1,67 @@
+{
+  "version": "1.0",
+  "baseUrl": "https://jsonplaceholder.typicode.com",
+  "env": null,
+  "startedAt": "2026-08-02T08:26:47Z",
+  "scenarios": [
+    {
+      "name": "default",
+      "vus": 2,
+      "duration_s": 3.92,
+      "total_requests": 4,
+      "throughput_rps": 1.02,
+      "latency_ms": {
+        "avg": 1762.5,
+        "p50": 3133,
+        "p90": 3908,
+        "p95": 3908,
+        "p99": 3908,
+        "max": 3908
+      },
+      "error_rate": 0.5,
+      "by_endpoint": [
+        {
+          "endpointId": "GET_/pets/{id}",
+          "requests": 2,
+          "errors": 2,
+          "p50_ms": 9,
+          "p95_ms": 9,
+          "p99_ms": 9
+        },
+        {
+          "endpointId": "POST_/pets",
+          "requests": 1,
+          "errors": 0,
+          "p50_ms": 3133,
+          "p95_ms": 3133,
+          "p99_ms": 3133
+        },
+        {
+          "endpointId": "GET_/pets",
+          "requests": 1,
+          "errors": 0,
+          "p50_ms": 3908,
+          "p95_ms": 3908,
+          "p99_ms": 3908
+        }
+      ],
+      "sla": {
+        "rules": [
+          {
+            "metric": "p95",
+            "op": "<",
+            "value": 99999.0,
+            "isPercent": false
+          }
+        ],
+        "passed": true,
+        "violations": []
+      }
+    }
+  ],
+  "summary": {
+    "total_requests": 4,
+    "total_duration_s": 3.92,
+    "avg_rps": 1.02
+  }
+}
