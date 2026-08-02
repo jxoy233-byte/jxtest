@@ -52,28 +52,28 @@ Syntax: `{{var}}` — replaced anywhere in the value (URL, header, body, query).
 
 ```bash
 # List environments
-python skills/api-test-env/scripts/env.py list
+jxtest env list
 
 # Show one env (resolved values, secrets masked)
-python skills/api-test-env/scripts/env.py show staging
+jxtest env show staging
 
 # Create new env from template
-python skills/api-test-env/scripts/env.py create staging --base-url https://api.staging.com
+jxtest env create staging --base-url https://api.staging.com
 
 # Set a value
-python skills/api-test-env/scripts/env.py set staging TOKEN eyJhbGciOi...
+jxtest env set staging TOKEN eyJhbGciOi...
 
 # Validate all envs against api-spec.json
-python skills/api-test-env/scripts/env.py validate --spec api-spec.json
+jxtest env validate --spec api-spec.json
 
 # Resolve a string (for ad-hoc use)
-python skills/api-test-env/scripts/env.py resolve --env staging "{{baseUrl}}/users/{{USER}}"
+jxtest env resolve --env staging "{{baseUrl}}/users/{{USER}}"
 ```
 
 ## Integration with api-test-run
 
 ```bash
-python skills/api-test-run/scripts/run.py test-cases.json \
+jxtest run test-cases.json \
   --env staging \
   -o test-results.json
 ```

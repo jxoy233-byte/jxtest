@@ -55,7 +55,7 @@ Generate test cases from `api-spec.json`. Combines deterministic rule-based gene
 
 1. **Run rule-based generation** (deterministic, produces ~70% of cases):
    ```bash
-   python skills/api-test-gen/scripts/generate.py api-spec.json -o test-cases.json
+   jxtest gen api-spec.json -o test-cases.json
    ```
    This generates positive + basic negative cases by analyzing schema constraints.
 
@@ -68,7 +68,7 @@ Generate test cases from `api-spec.json`. Combines deterministic rule-based gene
 
 3. **Validate**:
    ```bash
-   python skills/api-test-gen/scripts/validate.py test-cases.json
+   jxtest validate test-cases.json
    ```
    Checks: every case has id + method + path, all referenced endpointIds exist, no duplicate IDs.
 

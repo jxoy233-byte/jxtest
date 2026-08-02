@@ -32,7 +32,7 @@ The report contains:
 
 1. **Generate the report**:
    ```bash
-   python skills/api-test-report/scripts/report.py test-results.json -o report.html
+   jxtest report test-results.json -o report.html
    ```
 
 2. **Preview** (optional):

@@ -56,7 +56,7 @@ The script applies accepted fixes to `test-cases.json` and writes a heal report.
 
 1. **Run heal**:
    ```bash
-   python skills/api-test-heal/scripts/heal.py \
+   jxtest heal \
      test-results.json \
      --cases test-cases.json \
      --spec api-spec.json \
@@ -70,7 +70,7 @@ The script applies accepted fixes to `test-cases.json` and writes a heal report.
 
 3. **Re-run tests** to verify:
    ```bash
-   python skills/api-test-run/scripts/run.py test-cases.json --env staging
+   jxtest run test-cases.json --env staging
    ```
 
 ## Rules

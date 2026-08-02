@@ -109,14 +109,14 @@ Write a performance report identifying the top 3 issues with concrete remediatio
 
 1. **Quick run** (one scenario):
    ```bash
-   python skills/api-test-load/scripts/load.py test-cases.json \
+   jxtest load test-cases.json \
      --base-url https://api.example.com \
      --vus 50 --duration 30s
    ```
 
 2. **Multi-scenario** (recommended):
    ```bash
-   python skills/api-test-load/scripts/load.py test-cases.json \
+   jxtest load test-cases.json \
      --config load.config.json
    ```
 

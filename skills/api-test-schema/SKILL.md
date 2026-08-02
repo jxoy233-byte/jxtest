@@ -49,7 +49,7 @@ A single file path. Format is auto-detected by content.
 
 1. **Run the parser**:
    ```bash
-   python skills/api-test-schema/scripts/parse.py <input-file> -o api-spec.json
+   jxtest schema <input-file> -o api-spec.json
    ```
    Auto-detects format. Pass `--format openapi|postman|har` if detection fails.
 

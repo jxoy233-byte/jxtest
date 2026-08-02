@@ -27,7 +27,7 @@ A running HTTP server on `http://localhost:<port>`. Logs to stdout.
 
 1. **Start the mock server**:
    ```bash
-   python skills/api-test-mock/scripts/mock.py api-spec.json --port 8080
+   jxtest mock api-spec.json --port 8080
    ```
 
 2. **Use it**:
@@ -38,7 +38,7 @@ A running HTTP server on `http://localhost:<port>`. Logs to stdout.
 
 3. **Run tests against the mock**:
    ```bash
-   python skills/api-test-run/scripts/run.py test-cases.json \
+   jxtest run test-cases.json \
      --base-url http://localhost:8080
    ```
 

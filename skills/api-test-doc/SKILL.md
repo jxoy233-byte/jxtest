@@ -35,11 +35,11 @@ Generate a single Markdown file documenting every endpoint in `api-spec.json`. M
 
 1. **Generate docs**:
    ```bash
-   python skills/api-test-doc/scripts/doc.py api-spec.json -o docs.md
+   jxtest doc api-spec.json -o docs.md
    ```
    With test data:
    ```bash
-   python skills/api-test-doc/scripts/doc.py api-spec.json \
+   jxtest doc api-spec.json \
      --results test-results.json -o docs.md
    ```
 
