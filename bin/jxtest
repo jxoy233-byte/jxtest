@@ -22,6 +22,9 @@ CMDS = {
     "security": ("api-test-security", "security.py"),
     "diff":     ("api-test-diff",   "diff.py"),
     "coverage": ("api-test-coverage", "coverage.py"),
+    "completion": ("api-test-completion", "completion.py"),
+    "scenario": ("api-test-scenario", "scenario.py"),
+    "factory": ("api-test-factory", "factory.py"),
 }
 
 HELP = """jxtest — AI-native API testing toolkit
@@ -43,6 +46,9 @@ Commands:
   coverage  Analyze test-results.json vs api-spec.json → coverage gaps
   report    Generate HTML report
   doc       Generate Markdown API docs
+  scenario  Generate end-to-end business scenario test cases (login → action → verify)
+  factory   Generate per-test unique data + auto-cleanup after the run
+  completion Generate shell completion (bash|zsh|fish)
 
 Examples:
   jxtest schema openapi.yaml
@@ -52,6 +58,7 @@ Examples:
   jxtest security api-spec.json --base-url https://api.example.com
   jxtest diff old-spec.json new-spec.json -o migration.md
   jxtest heal results.json --cases test-cases.json
+  eval "$(jxtest completion bash)"   # enable tab-completion
 
 Each command forwards all args to the underlying skill script.
 Use `jxtest <command> --help` for command-specific options.

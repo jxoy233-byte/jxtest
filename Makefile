@@ -37,7 +37,7 @@ help:
 	@echo "  make all                           full pipeline"
 	@echo "  make clean                         remove generated files"
 	@echo ""
-	@echo "Or use the CLI directly:  jxtest <schema|gen|run|load|heal|security|diff|report|doc|env|mock>"
+	@echo "Or use the CLI directly:  jxtest <schema|gen|run|load|heal|security|diff|report|doc|env|mock|scenario|factory|completion>"
 
 install:
 	@mkdir -p ~/.local/bin

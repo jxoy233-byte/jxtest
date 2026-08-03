@@ -321,6 +321,8 @@ def main() -> None:
     ap.add_argument("--baseline", help="Previous test-load-results.json to compare against")
     ap.add_argument("--regression-pct", type=float, default=20.0,
                     help="Flag endpoint if p95 grows by more than this %% vs baseline")
+    ap.add_argument("--ramp-step", type=int, default=0,
+                    help="Step-up load: split into N stages of equal VU increments (e.g. 4 = 25/50/75/100%% of --vus). Each stage runs for --duration seconds.")
     args = ap.parse_args()
 
     cases_path = Path(args.cases)
@@ -352,6 +354,24 @@ def main() -> None:
             "duration": args.duration,
             "rampUp": args.ramp_up,
         }]
+
+    # Step-up: a single scenario expands into N sub-scenarios that escalate VUs.
+    # Capacity planners use this to find the inflection point where p95 starts
+    # to bend — much cheaper than running several full --vus tests by hand.
+    if args.ramp_step and args.ramp_step > 1 and not (args.config and Path(args.config).exists()):
+        n = args.ramp_step
+        base_scenario = scenarios[0]
+        expanded = []
+        for stage in range(1, n + 1):
+            vu = max(1, round(args.vus * stage / n))
+            expanded.append({
+                **base_scenario,
+                "name": f"step-{stage}/{n} ({vu} VUs)",
+                "vus": vu,
+                "duration": args.duration,
+                "rampUp": args.ramp_up,
+            })
+        scenarios = expanded
 
     results = []
     for sc in scenarios:
@@ -403,6 +423,16 @@ def main() -> None:
     }
     Path(args.output).write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"OK  {args.output}", file=sys.stderr)
+
+    # Step-up capacity table: when --ramp-step was used, print a one-line p95
+    # summary per stage so capacity planners can pick the "before the bend" row
+    # without opening the JSON.
+    if args.ramp_step and args.ramp_step > 1 and len(results) > 1:
+        print(f"    capacity table (vu → p95 / errors):", file=sys.stderr)
+        for r in results:
+            err_pct = round(r["error_rate"] * 100, 1)
+            print(f"      {r['vus']:>3} VUs → p95={r['latency_ms']['p95']}ms, "
+                  f"rps={r['throughput_rps']}, errors={err_pct}%", file=sys.stderr)
 
     # Exit non-zero on SLA violations or regressions (CI-friendly)
     any_sla_fail = any(r.get("sla") and not r["sla"]["passed"] for r in results)

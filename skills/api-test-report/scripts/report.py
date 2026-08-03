@@ -31,7 +31,7 @@ def failure_badge(cls: str | None) -> str:
     return f'<span class="badge small" style="background:{color}">{esc(cls)}</span>'
 
 
-def render(results: dict) -> str:
+def render(results: dict, baseline: dict | None = None, title: str = "Test Report") -> str:
     s = results["summary"]
     total = s["total"] or 1
     pass_rate = round(s["passed"] / total * 100, 1)
@@ -43,6 +43,80 @@ def render(results: dict) -> str:
         by_class[k] = by_class.get(k, 0) + 1
 
     slowest = sorted(results["results"], key=lambda r: r.get("durationMs") or 0, reverse=True)[:5]
+
+    # Trend section: render only when a baseline was provided. Built from a
+    # per-case comparison so flaky tests that randomly pass/fail don't get
+    # mischaracterized as regressions.
+    trend_html = ""
+    if baseline:
+        b_results = baseline.get("results", [])
+        b_by_id = {r["caseId"]: r for r in b_results}
+        regressions, fixes, new_tests = [], [], []
+        for r in results["results"]:
+            prev = b_by_id.get(r["caseId"])
+            if prev is None:
+                continue
+            if prev["status"] == "passed" and r["status"] == "failed":
+                regressions.append((r, prev))
+            elif prev["status"] == "failed" and r["status"] == "passed":
+                fixes.append(r)
+        for r in results["results"]:
+            if r["caseId"] not in {p["caseId"] for p in b_results}:
+                new_tests.append(r)
+
+        trend_rows = []
+        for cur, prev in regressions[:20]:
+            trend_rows.append(
+                f"<tr><td>🔻 regressed</td><td><code>{esc(cur['caseId'])}</code></td>"
+                f"<td>{esc(prev['status'])} → {esc(cur['status'])}</td></tr>"
+            )
+        for r in fixes[:20]:
+            trend_rows.append(
+                f"<tr><td>✅ fixed</td><td><code>{esc(r['caseId'])}</code></td>"
+                f"<td>failed → passed</td></tr>"
+            )
+        for r in new_tests[:10]:
+            trend_rows.append(
+                f"<tr><td>🆕 new</td><td><code>{esc(r['caseId'])}</code></td>"
+                f"<td>{esc(r['status'])}</td></tr>"
+            )
+        trend_table = "".join(trend_rows) or "<tr><td colspan='3'><em>no changes</em></td></tr>"
+        bs = baseline.get("summary", {})
+        cs = results["summary"]
+        trend_summary = (
+            f"<tr><td>passed</td><td>{bs.get('passed','-')}</td><td>{cs['passed']}</td>"
+            f"<td>{cs['passed']-bs.get('passed',0):+}</td></tr>"
+            f"<tr><td>failed</td><td>{bs.get('failed','-')}</td><td>{cs['failed']}</td>"
+            f"<td>{cs['failed']-bs.get('failed',0):+}</td></tr>"
+            f"<tr><td>errors</td><td>{bs.get('errors','-')}</td><td>{cs['errors']}</td>"
+            f"<td>{cs['errors']-bs.get('errors',0):+}</td></tr>"
+        )
+        trend_html = f"""
+<div class="section">
+  <h2>Trend vs baseline</h2>
+  <table>
+    <tr><th>Metric</th><th>Baseline</th><th>Current</th><th>Δ</th></tr>
+    {trend_summary}
+  </table>
+  <table style="margin-top:12px">
+    <tr><th>Status</th><th>Case</th><th>Change</th></tr>
+    {trend_table}
+  </table>
+</div>
+"""
+    trend_badges = ""
+    if baseline:
+        bs = baseline["summary"]
+        cs = s
+        trend_badges = (
+            f"<div class='card' style='margin-top:12px'>"
+            f"<div class='num'>{(cs['passed']-bs.get('passed',0)):+}</div>"
+            f"<div class='lbl'>Δ passed vs baseline</div></div>"
+            f"<div class='card'>"
+            f"<div class='num'>{(cs['failed']-bs.get('failed',0)):+}</div>"
+            f"<div class='lbl'>Δ failed vs baseline</div></div>"
+        )
+
 
     rows = []
     for r in results["results"]:
@@ -86,7 +160,7 @@ Error:   {esc(err)}
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Test Report — {esc(results.get('startedAt', ''))}</title>
+<title>{esc(title)} — {esc(results.get('startedAt', ''))}</title>
 <style>
   body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; padding: 24px; background: #f8fafc; color: #0f172a; }}
   h1 {{ margin: 0 0 8px 0; font-size: 24px; }}
@@ -113,7 +187,7 @@ Error:   {esc(err)}
 </style>
 </head>
 <body>
-<h1>Test Report</h1>
+<h1>{esc(title)}</h1>
 <div class="meta">Started {esc(results.get('startedAt', ''))} • Duration {results.get('durationMs', 0)}ms • Base URL {esc(results.get('baseUrl', ''))}</div>
 
 <div class="summary">
@@ -124,7 +198,9 @@ Error:   {esc(err)}
   <div class="card"><div class="num">{pass_rate}%</div><div class="lbl">Pass rate</div></div>
 </div>
 
-{('<div class="section"><h2>Failure breakdown</h2><div class="summary">' + class_cards + '</div></div>') if class_cards else ''}
+{('<div class="section"><h2>Failure breakdown</h2><div class="summary">' + class_cards + trend_badges + '</div></div>') if class_cards or trend_badges else ''}
+
+{trend_html}
 
 <div class="section">
   <h2>Slowest tests</h2>
@@ -147,6 +223,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Generate HTML report from test-results.json")
     ap.add_argument("input", help="test-results.json")
     ap.add_argument("-o", "--output", default="report.html")
+    ap.add_argument("--baseline", help="Previous test-results.json — render a delta table so trends are obvious")
+    ap.add_argument("--title", default="Test Report", help="Custom title")
     args = ap.parse_args()
 
     src = Path(args.input)
@@ -154,10 +232,20 @@ def main() -> None:
         sys.exit(f"Error: {src} not found")
     data = json.loads(src.read_text(encoding="utf-8"))
 
-    html = render(data)
+    baseline = None
+    if args.baseline and Path(args.baseline).exists():
+        baseline = json.loads(Path(args.baseline).read_text(encoding="utf-8"))
+
+    html = render(data, baseline=baseline, title=args.title)
     Path(args.output).write_text(html, encoding="utf-8")
     s = data["summary"]
-    print(f"OK  {args.output}  ({s['passed']}/{s['total']} passed, {s['failed']} failed, {s['errors']} errors)", file=sys.stderr)
+    extra = ""
+    if baseline:
+        cur = s["passed"]
+        prev = baseline.get("summary", {}).get("passed", 0)
+        delta = cur - prev
+        extra = f"  (Δ passed {delta:+})"
+    print(f"OK  {args.output}  ({s['passed']}/{s['total']} passed, {s['failed']} failed, {s['errors']} errors){extra}", file=sys.stderr)
 
 
 if __name__ == "__main__":

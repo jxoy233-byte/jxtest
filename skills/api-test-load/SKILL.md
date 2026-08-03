@@ -19,6 +19,9 @@ Drive `test-cases.json` under sustained load. Reports throughput, latency distri
 - `--config load.config.json` (optional, defines scenarios)
 - `--env <name>` (optional)
 - `--vus`, `--duration`, `--ramp-up` (overrides if not in config)
+- `--baseline <file>` (optional) — compare p95 against a previous `test-load-results.json`
+- `--regression-pct <n>` (optional, default 20%) — flag an endpoint if p95 grew more than N%
+- `--ramp-step <n>` (optional) — step-up capacity test (see below)
 
 ## Output
 
@@ -136,10 +139,29 @@ Write a performance report identifying the top 3 issues with concrete remediatio
 - **No assertions**: load test only measures; doesn't validate responses.
 - **Random case selection**: each VU picks a random case per loop to simulate real traffic.
 
+## Step-up capacity testing (`--ramp-step`)
+
+When you want to find the inflection point where p95 starts to bend, `--ramp-step N` expands the single-scenario into N stages of escalating VUs (25% / 50% / 75% / 100% / 125% of `--vus`) and prints a one-line capacity table:
+
+```bash
+jxtest load test-cases.json --vus 200 --duration 30s --ramp-step 5
+```
+
+```
+capacity table (vu → p95 / errors):
+   40 VUs → p95=14ms,  rps=2400, errors=0.0%
+   80 VUs → p95=18ms,  rps=4800, errors=0.0%
+  120 VUs → p95=28ms,  rps=6800, errors=0.2%
+  160 VUs → p95=180ms, rps=7200, errors=1.4%   ← cliff
+  200 VUs → p95=820ms, rps=7100, errors=6.0%
+```
+
+Capacity planners pick the row "before the bend" — in the example above, 120 VUs. Each row is a full sub-scenario; `--baseline` still applies if you also want a regression check.
+
 ## When to stop
 
 Press `Ctrl+C` for graceful shutdown. Partial results are saved.
 
 ## Next step
 
-After load test, run `api-test-report` or compare runs with `diff` / `jq`.
+After load test, run `api-test-report` (with `--baseline prev.json` for trend delta), or compare runs with `diff` / `jq`.

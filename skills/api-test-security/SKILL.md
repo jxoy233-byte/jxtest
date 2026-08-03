@@ -42,6 +42,9 @@ jxtest security api-spec.json --base-url https://api.example.com \
 
 # Override envelope config at the command line
 jxtest security api-spec.json --envelope 'code:0'
+
+# Add custom probe rules (see "Custom rules" below)
+jxtest security api-spec.json --rules examples/security-rules.json
 ```
 
 ## Output
@@ -62,20 +65,48 @@ jxtest security api-spec.json --envelope 'code:0'
       "securityType": "idor",
       "severity": "critical",
       "vulnerable": true,
-      "evidence": "Got HTTP 200 code=0 (ok), expected the request to be refused"
-    },
-    {
-      "endpointId": "POST_items",
-      "securityType": "ssrf",
-      "severity": "medium",
-      "serverError": true,
-      "evidence": "Got HTTP 200 code=500 (KeyError: 'name') — server error, likely a bug"
+      "evidence": "Got HTTP 200 code=0 (ok), expected the request to be refused",
+      "remediation": "Enforce per-request ownership: pull user_id from the JWT/session, then compare against the resource's owner_id before returning data.",
+      "fixExample": "function assertOwns(req, resource) { if (resource.owner_id !== req.user.id) return res.status(403).send(); }"
     }
   ]
 }
 ```
 
-`vulnerabilities` only counts confirmed exploits. `server_errors` are reported separately (and capped at `medium` severity) — they're signals about API defects, not confirmed vulnerabilities.
+Every finding ships with a `remediation` line + `fixExample` snippet — a paste-ready fix for the stack you can review against. `vulnerabilities` only counts confirmed exploits. `server_errors` are reported separately (and capped at `medium` severity) — they're signals about API defects, not confirmed vulnerabilities.
+
+## Custom rules (`--rules`)
+
+When the built-in probes don't cover a quirk of your stack, write your own. Each rule is a probe that's applied to every endpoint matching `method_match` / `param_match`:
+
+```json
+{
+  "rules": [
+    {
+      "name": "admin_bypass_header",
+      "label": "X-Admin-Bypass header bypass",
+      "method_match": ["GET", "POST", "PUT", "DELETE", "PATCH"],
+      "headers": {"X-Admin-Bypass": "true"},
+      "assertion": {"type": "safe_response"}
+    }
+  ]
+}
+```
+
+Reference schema:
+
+| Field | Required | Example | Meaning |
+|-------|----------|---------|---------|
+| `name` | ✅ | `admin_bypass_header` | securityType label, becomes `findings[].securityType` |
+| `method_match` | – | `["GET","POST"]` | skip endpoint if its method isn't in this list |
+| `param_match` | – | `{"name": "tenant", "in": "query"}` | skip endpoint if it has no matching param |
+| `headers` | – | `{"X-Internal": "1"}` | extra request headers |
+| `query` | – | `{"debug": "1"}` | extra query params |
+| `body` | – | `{"grant": "all"}` | extra / override body |
+| `assertion` | – | `{"type":"safe_response"}` (default) | same shape as a test assertion |
+| `label` | – | `"X-Admin-Bypass header bypass"` | human-readable label in the finding |
+
+Custom rules participate in the same ranking pipeline — a failed custom probe becomes a finding with the full `remediation` / `fixExample` populated if you also wire up the `securityType` in your own remediation map, or a default empty stub otherwise.
 
 ## Exit codes
 

@@ -36,7 +36,7 @@ def now_iso() -> str:
 
 
 
-def run_assertion(assertion: dict, response: dict, spec: dict | None, envelope: dict | None = None) -> dict:
+def run_assertion(assertion: dict, response: dict, spec: dict | None, envelope: dict | None = None, script_path: str | None = None) -> dict:
     t = assertion["type"]
     if response.get("networkError"):
         return {**assertion, "passed": False, "skipped": "network_error"}
@@ -88,7 +88,9 @@ def run_assertion(assertion: dict, response: dict, spec: dict | None, envelope: 
             # a correctly refused request — that must fail loudly.
             passed = outcome == "rejected"
         return {**assertion, "actual": describe(response, envelope), "outcome": outcome, "passed": passed}
-    if t in ("json_path", "json_path_exists", "json_path_type", "json_path_in", "json_path_not_in"):
+    if t == "custom":
+        return run_custom_assertion(assertion, response, script_path)
+    if t in ("json_path", "json_path_exists", "json_path_type", "json_path_in", "json_path_not_in", "json_path_regex", "json_path_length"):
         try:
             data = json.loads(response.get("body") or "{}")
         except json.JSONDecodeError:
@@ -104,6 +106,19 @@ def run_assertion(assertion: dict, response: dict, spec: dict | None, envelope: 
             return {**assertion, "actual": val, "passed": val in assertion["expected"]}
         if t == "json_path_not_in":
             return {**assertion, "actual": val, "passed": val not in assertion["expected"]}
+        if t == "json_path_regex":
+            ok = bool(re.search(assertion["pattern"], str(val) if val is not None else ""))
+            return {**assertion, "actual": val, "passed": ok}
+        if t == "json_path_length":
+            # length assertion on a JSON path that resolves to a string or list
+            op = assertion.get("op", "lt")
+            n = len(val) if val is not None else 0
+            if op == "lt": ok = n < assertion["lt"]
+            elif op == "gt": ok = n > assertion["gt"]
+            elif op == "eq": ok = n == assertion["eq"]
+            elif op == "between": ok = assertion["min"] <= n <= assertion["max"]
+            else: ok = False
+            return {**assertion, "actual": n, "passed": ok}
     if t == "schema_matches" and spec:
         status = str(response.get("status", 0))
         schema = (spec.get("responses", {}).get(status, {}).get("schema") or {})
@@ -162,6 +177,39 @@ def load_pre_script(path: str | None):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return getattr(mod, "pre", lambda ctx: None)
+
+
+# Custom assertion: load a Python file once per run; each assertion calls a named
+# function with `(response, assertion)` and returns True/False. Lifts jxtest beyond
+# the built-in assertion set when an API has response quirks the rules can't see.
+_CUSTOM_ASSERT_CACHE: dict[str, object] = {}
+
+
+def _get_custom_module(path: str):
+    cached = _CUSTOM_ASSERT_CACHE.get(path)
+    if cached is not None:
+        return cached
+    spec = importlib.util.spec_from_file_location(f"_custom_asserts_{path}", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _CUSTOM_ASSERT_CACHE[path] = mod
+    return mod
+
+
+def run_custom_assertion(assertion: dict, response: dict, script_path: str | None = None) -> dict:
+    """A 'custom' assertion calls a Python function from --custom-asserts file.
+    The function receives (response, assertion) and returns a truthy value
+    (bool is conventional). On any error, the assertion fails loudly rather than
+    silently misclassifying."""
+    if not script_path:
+        return {**assertion, "passed": False, "error": "custom assertion: missing scriptPath"}
+    try:
+        mod = _get_custom_module(script_path)
+        fn = getattr(mod, fn_name)
+        result = fn(response, assertion)
+        return {**assertion, "actual": repr(result)[:200], "passed": bool(result)}
+    except Exception as e:
+        return {**assertion, "passed": False, "error": f"{type(e).__name__}: {e}"}
 
 
 def _build_phases(cases: list[dict]) -> list[list[dict]]:
@@ -319,7 +367,8 @@ def _run_one_inner(case, resolved_case, auth_headers, base_url, auth, timeout, s
             resp = execute(url, resolved_case["method"], headers, resolved_case.get("body"), timeout)
 
     is_network = resp.get("networkError", False)
-    assertion_results = [run_assertion(a, resp, spec, envelope) for a in resolved_case.get("assertions", [])]
+    assertion_results = [run_assertion(a, resp, spec, envelope, script_path=args.custom_asserts)
+                         for a in resolved_case.get("assertions", [])]
     all_passed = all(a["passed"] for a in assertion_results)
     passed = not is_network and all_passed
     outcome = classify(resp, envelope)
@@ -390,6 +439,7 @@ def main() -> None:
     ap.add_argument("--filter", help="Run only these categories (comma-separated)")
     ap.add_argument("--profile", choices=sorted(PROFILES), help="Category preset: smoke | full")
     ap.add_argument("--pre-script", help="Python file with pre(case) hook")
+    ap.add_argument("--custom-asserts", help="Python file exporting assertion functions for `custom` assertion type")
     ap.add_argument("--spec", help="api-spec.json for schema validation")
     ap.add_argument("--envelope", help="Business-code envelope, e.g. 'code:0' or 'code:0,200:msg' (overrides test-cases.json)")
     ap.add_argument("--envelope-suggested", help="Trust an auto-detected envelope config and proceed without prompting. Same syntax as --envelope.")
@@ -462,6 +512,12 @@ def main() -> None:
             sys.exit(2)
 
     pre_hook = load_pre_script(args.pre_script)
+    if args.custom_asserts:
+        # Pre-cache the module so the first custom assertion doesn't pay the import cost
+        try:
+            _get_custom_module(args.custom_asserts)
+        except Exception as e:
+            print(f"custom-asserts: failed to load {args.custom_asserts}: {e}", file=sys.stderr)
     defaults = data.get("defaults", {})
     cases = data.get("cases", [])
     selected = args.filter or (PROFILES[args.profile] if args.profile else None)

@@ -53,6 +53,90 @@ ATTACK_DESCRIPTIONS = {
     "xss": "XSS: payload reflected in response",
 }
 
+# Concrete remediation snippets. Each entry: short label + example code/config.
+# The point isn't a textbook answer — it's a 2-minute paste-and-go fix the user
+# can review against their stack.
+ATTACK_FIXES = {
+    "idor": (
+        "Enforce per-request ownership: pull user_id from the JWT/session, then "
+        "compare against the resource's owner_id before returning data.",
+        "# Express middleware\n"
+        "function assertOwns(req, resource) {\n"
+        "  if (resource.owner_id !== req.user.id) return res.status(403).send();\n"
+        "}",
+    ),
+    "broken_auth_empty": (
+        "Reject requests without a valid Bearer token. A missing token is the same "
+        "as an unauthenticated request.",
+        "# FastAPI\n"
+        "from fastapi import Depends, HTTPException\n"
+        "async def require_auth(authorization: str = Header(None)):\n"
+        "    if not authorization or not authorization.startswith(\"Bearer \"):\n"
+        "        raise HTTPException(status_code=401)",
+    ),
+    "broken_auth_garbage": (
+        "Validate JWT shape and signature before trusting it. Reject tokens that "
+        "don't parse with HTTP 401.",
+        "import jwt\n"
+        "try:\n"
+        "    payload = jwt.decode(token, SECRET, algorithms=[\"HS256\"])\n"
+        "except jwt.PyJWTError:\n"
+        "    return 401",
+    ),
+    "broken_auth_expired": (
+        "Reject expired tokens with 401. Refresh tokens must be exchanged via a "
+        "dedicated endpoint, not auto-extended by other requests.",
+        "if payload[\"exp\"] < time.time():\n"
+        "    return 401, {\"code\": \"TOKEN_EXPIRED\"}",
+    ),
+    "mass_assignment": (
+        "Whitelist allowed fields. Never spread request body into the update "
+        "payload — pick known safe fields explicitly.",
+        "# SQLAlchemy\n"
+        "user.update({\n"
+        "    \"name\": body[\"name\"],\n"
+        "    \"email\": body[\"email\"],\n"
+        "})  # ignore 'isAdmin', 'role', etc.",
+    ),
+    "path_traversal": (
+        "Resolve user-supplied paths and verify they stay inside the allowed root. "
+        "Block '..' segments and reject absolute paths.",
+        "import os\n"
+        "safe = os.path.realpath(os.path.join(BASE_DIR, user_path))\n"
+        "if not safe.startswith(BASE_DIR) or \"..\" in user_path:\n"
+        "    return 400",
+    ),
+    "ssrf": (
+        "Validate URL schemes and resolve the host before fetching. Block private "
+        "IP ranges and metadata service IPs (169.254.169.254).",
+        "import ipaddress\n"
+        "ip = ipaddress.ip_address(socket.gethostbyname(host))\n"
+        "if ip.is_private or str(ip) == \"169.254.169.254\":\n"
+        "    return 400",
+    ),
+    "sensitive_data": (
+        "Strip PII from response payloads at the serialization layer. Use a DTO "
+        "class that omits fields like SSN / card number entirely.",
+        "class UserOut(BaseModel):\n"
+        "    id: int\n"
+        "    email: EmailStr\n"
+        "    # note: no ssn, no card_number — they aren't whitelisted",
+    ),
+    "sql_injection": (
+        "Use parameterized queries. Never build SQL by string concatenation; let "
+        "the driver handle escaping.",
+        "# OK\n"
+        "db.execute(\"SELECT * FROM users WHERE id = %s\", (user_id,))\n"
+        "# BAD: db.execute(f\"SELECT * FROM users WHERE id = {user_id}\")",
+    ),
+    "xss": (
+        "HTML-encode any user-controlled string before placing it in a page. "
+        "Prefer textContent over innerHTML; sanitize with a vetted library.",
+        "// instead of el.innerHTML = userInput:\n"
+        "el.textContent = userInput;",
+    ),
+}
+
 
 def gen_idor(endpoint: dict) -> list[dict]:
     """For path-param endpoints, try other users' IDs."""
@@ -175,7 +259,7 @@ def _success(endpoint: dict) -> int:
     return 200
 
 
-def generate_security_cases(spec: dict) -> list[dict]:
+def generate_security_cases(spec: dict, custom_rules: list[dict] | None = None) -> list[dict]:
     cases: list[dict] = []
     for ep in spec.get("endpoints", []):
         cases.extend(gen_idor(ep))
@@ -184,7 +268,66 @@ def generate_security_cases(spec: dict) -> list[dict]:
         cases.extend(gen_path_traversal(ep))
         cases.extend(gen_ssrf(ep))
         cases.extend(gen_sensitive_data_scan(ep))
+        if custom_rules:
+            for rule in custom_rules:
+                cases.extend(gen_custom_probe(ep, rule))
     return cases
+
+
+def gen_custom_probe(endpoint: dict, rule: dict) -> list[dict]:
+    """Apply a user-supplied probe rule.
+
+    Rule schema:
+      {
+        "name": "auth_required",
+        "method_match": ["GET","POST"],          # optional (default: all)
+        "param_match": {"name": "Authorization"},  # optional, header/query/path
+        "header": {"X-Bypass": "internal"},      # payload header override
+        "query": {"debug": "1"},
+        "body": {"grant": "all"},
+        "assertion": {"type": "safe_response"}   # default; see run_assertion
+      }
+
+    Returned cases match the rest of the security suite, so they share envelope
+    handling and the same ranking pipeline.
+    """
+    method = endpoint["method"]
+    if "method_match" in rule and method not in rule["method_match"]:
+        return []
+    payload_q = rule.get("query") or {}
+    payload_h = rule.get("headers") or {}
+    body = rule.get("body")
+    if rule.get("param_match") and isinstance(rule["param_match"], dict):
+        pm = rule["param_match"]
+        # Only run the rule on endpoints that have a matching param
+        if not any(
+            p.get("name") == pm.get("name") and p.get("in") == pm.get("in", "query")
+            for p in endpoint.get("parameters", [])
+        ):
+            return []
+    sec_type = rule.get("name", "custom")
+    assertion = {"type": rule.get("assertion", {}).get("type", "safe_response"),
+                 **{k: v for k, v in rule.get("assertion", {}).items() if k != "type"}}
+    return [_case(endpoint, endpoint["path"].replace("{id}", "1"),
+                  sec_type, rule.get("label", sec_type),
+                  assertion, query=payload_q, headers=payload_h, body=body)]
+
+
+_CUSTOM_RULE_CACHE: dict[str, list[dict]] = {}
+
+
+def load_custom_rules(path: str | None) -> list[dict]:
+    """Load --rules from a JSON file. Cached by path so re-running inside tests
+    doesn't reparse."""
+    if not path:
+        return []
+    if path in _CUSTOM_RULE_CACHE:
+        return _CUSTOM_RULE_CACHE[path]
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    if isinstance(raw, dict):
+        raw = raw.get("rules", [])
+    _CUSTOM_RULE_CACHE[path] = raw
+    return raw
 
 
 def run_one(case: dict, base_url: str, auth_headers: dict, timeout: float, scopes: list[dict],
@@ -246,6 +389,7 @@ def build_findings(results: list[dict]) -> list[dict]:
         if r["securityType"] == "sensitive_data" and r["status"] == "passed":
             for pat, kind, severity in SENSITIVE_PATTERNS:
                 if re.search(pat, r["body"]):
+                    fix_hint, fix_example = ATTACK_FIXES["sensitive_data"]
                     findings.append({
                         "endpointId": r["endpointId"],
                         "caseId": r["caseId"],
@@ -254,6 +398,8 @@ def build_findings(results: list[dict]) -> list[dict]:
                         "vulnerable": True,
                         "evidence": f"Response contains {kind} pattern",
                         "description": ATTACK_DESCRIPTIONS["sensitive_data"],
+                        "remediation": fix_hint,
+                        "fixExample": fix_example,
                     })
                     break
             continue
@@ -271,6 +417,7 @@ def build_findings(results: list[dict]) -> list[dict]:
                 severity = "medium" if severity in ("critical", "high") else severity
                 evidence = (f"Got {observed} — server error, likely a bug "
                             f"(missing input validation), not a confirmed vulnerability")
+            fix_hint, fix_example = ATTACK_FIXES.get(sec_type, ("", ""))
             findings.append({
                 "endpointId": r["endpointId"],
                 "caseId": r["caseId"],
@@ -279,6 +426,8 @@ def build_findings(results: list[dict]) -> list[dict]:
                 "vulnerable": r.get("outcome") != "server_error",
                 "evidence": evidence,
                 "description": ATTACK_DESCRIPTIONS.get(sec_type, sec_type),
+                "remediation": fix_hint,
+                "fixExample": fix_example,
             })
     return findings
 
@@ -304,6 +453,7 @@ def main() -> None:
     ap.add_argument("--include", help="Comma-separated attack types to include (default: all)",
                     default="idor,broken_auth,mass_assignment,path_traversal,ssrf,sensitive_data")
     ap.add_argument("--exclude", help="Comma-separated attack types to skip (e.g. 'ssrf,path_traversal')")
+    ap.add_argument("--rules", help="Path to a JSON file with custom security probe rules to add to the suite")
     ap.add_argument("--token", help="Bearer token to send with every probe (skips spec auth)")
     ap.add_argument("--pre-script", help="Python file with pre(ctx) hook for custom auth")
     ap.add_argument("--envelope", help="Business-code envelope, e.g. 'code:0' or 'code:0,200:msg' (overrides api-spec.json)")
@@ -325,6 +475,7 @@ def main() -> None:
     include = set(args.include.split(","))
     if args.exclude:
         include -= set(args.exclude.split(","))
+    custom_rules = load_custom_rules(args.rules)
     cases: list[dict] = []
     for ep in spec.get("endpoints", []):
         if "idor" in include:
@@ -339,6 +490,8 @@ def main() -> None:
             cases.extend(gen_ssrf(ep))
         if "sensitive_data" in include:
             cases.extend(gen_sensitive_data_scan(ep))
+        for rule in custom_rules:
+            cases.extend(gen_custom_probe(ep, rule))
 
     if not cases:
         sys.exit("Error: no security cases generated (spec may have no endpoints)")

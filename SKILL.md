@@ -15,13 +15,16 @@ jxtest replaces Postman/Insomnia for AI-driven workflows. From an OpenAPI/Postma
 
 1. **Parses** the spec into `api-spec.json` (auto-detects enveloped APIs)
 2. **Generates** 7 categories of test cases (positive / negative / boundary / security / enum / format / idempotency), with envelope-aware assertions
-3. **Runs** functional tests with **20+ assertions** (incl. `business_ok` / `business_not_ok` for enveloped APIs, `error_structure` for error contracts), OAuth2 / login, env vars, data-driven, context passing
-4. **Loads** under concurrent VUs with **AI-friendly analysis** (bottlenecks, slow requests, error breakdown, recommendations) + SLA + baseline
-5. **Scans** for OWASP API Top 10 vulnerabilities (IDOR, broken auth, SSRF, PII exposure) — envelope-aware so real bugs don't masquerade as findings
+3. **Runs** functional tests with **20+ assertions** (incl. `business_ok` / `business_not_ok` for enveloped APIs, `json_path_regex` / `json_path_length` / `custom` for advanced checks, `error_structure` for error contracts), OAuth2 / login, env vars, data-driven, context passing
+4. **Loads** under concurrent VUs with **AI-friendly analysis** (bottlenecks, slow requests, error breakdown, recommendations) + SLA + baseline + step-up capacity testing
+5. **Scans** for OWASP API Top 10 vulnerabilities (IDOR, broken auth, SSRF, PII exposure) — envelope-aware so real bugs don't masquerade as findings; each finding now ships with a **concrete remediation snippet** and a `--rules` hook for custom probes
 6. **Diffs** two specs to detect breaking changes
 7. **Reports coverage gaps** (endpoints / methods / categories / declared response codes / business outcomes)
 8. **Heals** failed assertions via heuristic + LLM
-9. **Reports** HTML + JUnit XML + Markdown
+9. **Reports** HTML (+ trend delta vs baseline) + JUnit XML + Markdown
+10. **Generates scenario flows** (`scenario`) — login → action → verify chains, not just single-shot requests
+11. **Manages test data** (`factory`) — generates unique synthetic data per test and **auto-cleans up** what the suite created, so CI leaves no rows behind
+12. **Shell completion** for bash / zsh / fish
 
 **Single CLI**: `jxtest <command> [args]`. Forward args; structured JSON in, structured JSON out.
 
@@ -40,8 +43,11 @@ jxtest replaces Postman/Insomnia for AI-driven workflows. From an OpenAPI/Postma
 | `diff` | Compare two specs → breaking changes |
 | `coverage` | Analyze coverage gaps (results vs spec) |
 | `heal` | Self-heal failed assertions |
-| `report` | HTML report |
+| `report` | HTML report (with `--baseline` for trend delta) |
 | `doc` | Markdown API docs |
+| `scenario` | Generate end-to-end business flow (login → action → verify) |
+| `factory` | Generate unique data + auto-cleanup after the run |
+| `completion` | Print shell completion script (bash \| zsh \| fish) |
 
 ## Standard workflow (run these in order)
 
@@ -88,11 +94,16 @@ jxtest coverage results.json --spec api-spec.json
 | "what's not tested" / "coverage gaps" / "missing tests" | `coverage` |
 | "fix the failing tests" / "why did X fail" | `heal` |
 | "show me a report" / "HTML" | `report` |
+| "report vs last release" / "trend delta" | `report --baseline prev.json` |
 | "API docs" / "markdown docs" | `doc` |
 | "no backend yet" / "stub the API" / "mock" | `mock` (stateful) |
 | "different values per run" / "100 users" / "data-driven" | `gen` (adds `data:[]`), then `run` |
 | "login then call X" / "pass token between calls" | `run` (uses `extract`) |
 | "compare to last release" / "perf regression" | `load --baseline prev.json` |
+| "test as a real user" / "full flow" / "E2E" | `scenario` |
+| "create test data per run" / "cleanup after" | `factory` |
+| "test how it scales" / "find the capacity cliff" | `load --ramp-step N` |
+| "tab-complete in bash/zsh" | `eval "$(jxtest completion bash)"` |
 
 ## Use case patterns
 
@@ -276,6 +287,101 @@ jxtest run test-cases.json --env local
 
 Long-running suites get a transparent token refresh: when an access token expires mid-run, `run` calls `auth.refresh()` and retries once. No user action needed.
 
+### Pattern 10: E2E business scenarios (not just per-endpoint tests)
+
+A happy-path test that goes login → list → create → get → update → delete catches bugs no per-endpoint test can — token expiration, ownership checks, follow-up read consistency.
+
+```bash
+jxtest scenario api-spec.json \
+  --login  /auth/login \
+  --list   /api/v1/items \
+  --create /api/v1/items --create-body '{"name":"item-{{$uuid}}"}' \
+  --get    /api/v1/items/{id} \
+  --delete /api/v1/items/{id} \
+  --envelope \
+  -o scenario-cases.json
+jxtest run scenario-cases.json --base-url $API_URL
+```
+
+The runner sees `extract` on each case → auto-builds a dependency graph → login runs first, the create/get/delete chain sees the real id, independent steps still run in parallel.
+
+### Pattern 11: Test-data factory + cleanup
+
+Per-run unique data plus automatic cleanup so CI doesn't leave rows behind:
+
+```bash
+# Generate 4 unique users in parallel
+jxtest factory factory.json --workers 4 -o factory-cases.json
+jxtest run factory-cases.json --env local --base-url $API_URL
+
+# After the run, emit a cleanup file (or run it inline)
+jxtest factory cleanup --factory factory.json \
+   --results test-results.json -o cleanup-cases.json
+jxtest run cleanup-cases.json --env local --base-url $API_URL
+```
+
+Failed creations are skipped (we never saw the id to delete). Cleanup cases accept 200/204/404 — a 404 means the resource is already gone, which is fine.
+
+### Pattern 12: Step-up capacity testing
+
+`--ramp-step` expands a single load scenario into N stages of escalating VUs. Prints a one-line per-stage summary so capacity planners can pick the row "before the bend":
+
+```bash
+jxtest load test-cases.json --vus 200 --duration 30s --ramp-step 5
+# capacity table (vu → p95 / errors):
+#    40 VUs → p95=14ms, rps=2400, errors=0.0%
+#    80 VUs → p95=18ms, rps=4800, errors=0.0%
+#   120 VUs → p95=28ms, rps=6800, errors=0.2%
+#   160 VUs → p95=180ms, rps=7200, errors=1.4%   ← cliff
+#   200 VUs → p95=820ms, rps=7100, errors=6.0%
+```
+
+### Pattern 13: Trend reports
+
+Pass a previous `test-results.json` to `report` and the HTML shows which cases regressed, fixed, or are new — without diffing any text:
+
+```bash
+jxtest report test-results.json --baseline test-results.prev.json -o report.html
+```
+
+### Pattern 14: Custom assertions
+
+When the built-in rules can't describe a quirk of your API, write a Python function:
+
+```bash
+jxtest run test-cases.json --custom-asserts examples/asserts.py
+```
+
+```python
+# examples/asserts.py
+def response_shape_matches(response, assertion):
+    return set(assertion["required"]) <= set(json.loads(response["body"]).keys())
+```
+
+```json
+{"type": "custom", "function": "response_shape_matches",
+ "required": ["id", "created_at", "updated_at"]}
+```
+
+### Pattern 15: Custom security rules + auto fix recipes
+
+Each security finding ships with a paste-ready remediation snippet by default (e.g. *use parameterized queries*, *whitelist DTO fields*). Add your own probe rules via a JSON file:
+
+```bash
+jxtest security api-spec.json --base-url $API_URL --rules examples/security-rules.json
+```
+
+```json
+{
+  "rules": [
+    {"name": "admin_bypass_header",
+     "method_match": ["GET","POST","PUT","DELETE","PATCH"],
+     "headers": {"X-Admin-Bypass": "true"},
+     "assertion": {"type": "safe_response"}}
+  ]
+}
+```
+
 ## Important rules (read these)
 
 1. **Stdlib-only Python** — no `requests`, no third-party deps. Only `pyyaml` for YAML OpenAPI specs.
@@ -305,19 +411,23 @@ jxtest/
 ├── guideline.md              ← development goals
 ├── Makefile                  ← `make ci` runs full pipeline
 ├── bin/jxtest                ← unified CLI (~85 lines)
-├── examples/petstore/        ← sample OpenAPI spec
+├── examples/                 ← petstore spec, factory recipe, custom asserts, security rules
 └── skills/
-    ├── api-test-schema/      ← per-skill SKILL.md + script
-    ├── api-test-env/
+    ├── api-test-schema/      ← parse OpenAPI/Postman/HAR → api-spec.json
+    ├── api-test-env/         ← environment files + {{var}} templating
     ├── api-test-mock/        ← stateful mock server
     ├── api-test-gen/         ← 7 categories of test cases
-    ├── api-test-run/         ← functional runner (data + context)
-    ├── api-test-load/        ← load + SLA + baseline
+    ├── api-test-run/         ← functional runner (data + context + custom asserts)
+    ├── api-test-load/        ← load + SLA + baseline + step-up capacity
     ├── api-test-heal/        ← LLM-driven self-healing
-    ├── api-test-security/    ← OWASP API Top 10
+    ├── api-test-security/    ← OWASP API Top 10 + fix recipes + custom rules
     ├── api-test-diff/        ← contract diffing
-    ├── api-test-report/      ← HTML report
+    ├── api-test-report/      ← HTML report with trend delta
+    ├── api-test-coverage/    ← coverage gap analysis
     ├── api-test-doc/         ← Markdown docs
+    ├── api-test-scenario/    ← E2E business flow (login → action → verify)
+    ├── api-test-factory/     ← unique per-test data + auto cleanup
+    ├── api-test-completion/  ← bash/zsh/fish completion
     └── _common/              ← shared stdlib modules
 ```
 

@@ -125,19 +125,49 @@ def pre(ctx):
 
 Script writes go into `ctx["headers"]`; whatever's there at hook exit is what gets sent. **Case-level headers outrank auth** so an `auth_required` test case that sends an empty `Authorization` is not silently given the real token.
 
-### 7. 20+ assertion types
+### 7. 22+ assertion types
 status / status_in / status_not / response_time_ms / header / header_exists /
 content_type / body_contains / body_not_contains / body_regex / body_size /
 no_reflected_payload / json_path / json_path_exists / json_path_type /
-**json_path_in** / **json_path_not_in** / **business_ok** / **business_not_ok** /
-schema_matches / **error_structure**
+**json_path_in** / **json_path_not_in** / **json_path_regex** / **json_path_length** /
+**business_ok** / **business_not_ok** / schema_matches / **error_structure** / **custom**
+
+- `json_path_regex` — regex-match a JSON path's stringified value (good for emails, UUIDs, ISO dates)
+- `json_path_length` — `lt` / `gt` / `eq` / `between` on the length of a string or list
+- `custom` — call a Python function from `--custom-asserts file.py`
 
 `schema_matches` walks `required` fields AND type-checks each property (not just top-level keys).
 
 `error_structure` validates that 4xx/5xx responses follow the API's error contract (default: `{code, message}`; configurable via `required` and `types`). Skips automatically when status is 2xx/3xx.
 
+#### `custom` assertion — when the rules can't describe your quirk
+
+```bash
+jxtest run test-cases.json --custom-asserts examples/asserts.py
+```
+
+```python
+# examples/asserts.py
+import json
+
+def response_shape_matches(response, assertion):
+    """Pass when response body has every key in `assertion['required']`."""
+    data = json.loads(response.get("body") or "{}")
+    return isinstance(data, dict) and set(assertion["required"]) <= set(data.keys())
+```
+
+```json
+{"type": "custom", "function": "response_shape_matches",
+ "required": ["id", "created_at", "updated_at"]}
+```
+
+Module is loaded once per run; failures surface as `{error: "ExceptionType: ..."}` rather than silently misclassifying.
+
 ### 8. Schema validation
 Pass `--spec api-spec.json` to enable `schema_matches` against the spec's response schemas.
+
+### Custom asserts file: `examples/asserts.py`
+A ready-to-edit example ships in the repo. Copy it, edit the functions, pass via `--custom-asserts`.
 
 ### 9. Profiles
 - `--profile smoke` — positive + boundary (fast CI subset)

@@ -82,6 +82,13 @@ That's it. No virtualenv, no Docker, no Node.js, no GUI.
 - **Dynamic variables** — `{{$timestamp}}`, `{{$uuid}}`, `{{$randomInt}}`, `{{$iso}}` are evaluated fresh per substitution. Override via scope for deterministic snapshots.
 - **Isolated endpoints** — `meta.isolated: true` for logout / password-change / account-delete. Runner snapshots auth, gets a fresh token for the case only, then restores. No more "one logout poisons the whole run".
 - **Coverage that catches lies** — endpoint coverage alone hides the "we hit it, never saw its 422" gap. Coverage now reports declared-but-unseen response codes and (under envelope) outcome distribution.
+- **E2E business scenarios** — `jxtest scenario` chains a real user flow (login → list → create → get → delete) so the suite catches bugs no per-endpoint test can: token expiration, ownership, follow-up consistency.
+- **Test-data factory + cleanup** — `jxtest factory` generates parallel-safe unique data per test, then auto-emits a `cleanup-cases.json` that DELETEs what the run created. CI leaves no rows behind.
+- **Step-up capacity testing** — `jxtest load --ramp-step N` runs N stages of escalating VUs and prints a one-line-per-stage summary, so capacity planners can pick the row "before the bend".
+- **Security findings ship with the fix** — every OWASP probe now reports a paste-ready remediation snippet (parameterized queries, whitelist DTO fields, …). `--rules` adds your own probes.
+- **Trend reports** — `jxtest report --baseline prev.json` shows what regressed, what got fixed, and what's new — no manual diffing.
+- **Custom assertions** — `--custom-asserts file.py` lets a Python function decide pass/fail for APIs whose quirks the built-in rules can't see.
+- **Shell completion** — `eval "$(jxtest completion bash)"` gets you tab-completion across `schema | gen | run | load | security | …`.
 
 ## What's in the box
 
@@ -92,14 +99,17 @@ That's it. No virtualenv, no Docker, no Node.js, no GUI.
 | `validate` | Validate `test-cases.json` structure |
 | `env` | Manage env files + `{{var}}` templating |
 | `mock` | Stateful mock server from spec |
-| `run` | Functional tests (data-driven / context / OAuth2 / 16+ assertions / JUnit) |
-| `load` | Load + SLA + baseline regression + AI-friendly analysis |
-| `security` | OWASP API Top 10 probes (IDOR / auth / SSRF / PII) |
+| `run` | Functional tests (data-driven / context / OAuth2 / 22+ assertions / JUnit) |
+| `load` | Load + SLA + baseline regression + step-up capacity + AI-friendly analysis |
+| `security` | OWASP API Top 10 probes (IDOR / auth / SSRF / PII) + fix recipes + `--rules` |
 | `diff` | Compare two specs → breaking changes + migration guide |
 | `coverage` | Coverage gaps (endpoints / methods / categories / statuses) |
 | `heal` | Self-heal failed assertions (heuristic + LLM) |
-| `report` | Self-contained HTML report |
+| `report` | Self-contained HTML report + trend delta vs baseline |
 | `doc` | Markdown API docs |
+| `scenario` | E2E business flow (login → action → verify) |
+| `factory` | Per-test unique data + auto cleanup |
+| `completion` | bash / zsh / fish shell completion |
 
 Single CLI entry: `jxtest <command>`. JSON in, JSON out. Exit codes 0/1/2 for CI.
 

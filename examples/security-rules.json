@@ -1,0 +1,26 @@
+{
+  "rules": [
+    {
+      "name": "admin_bypass_header",
+      "label": "X-Admin-Bypass header bypass",
+      "method_match": ["GET", "POST", "PUT", "DELETE", "PATCH"],
+      "headers": {"X-Admin-Bypass": "true"},
+      "assertion": {"type": "safe_response"}
+    },
+    {
+      "name": "internal_tenant_debug",
+      "label": "Internal tenant header dump",
+      "method_match": ["GET"],
+      "param_match": {"name": "tenant"},
+      "headers": {"X-Internal": "1"},
+      "assertion": {"type": "status_in", "expected": [400, 401, 403, 404, 422]}
+    },
+    {
+      "name": "graphql_batching",
+      "label": "Batch endpoint probe",
+      "method_match": ["POST"],
+      "body": [{"query": "{__schema { types { name } }}"}, {"query": "{__schema { types { name } }}"}],
+      "assertion": {"type": "safe_response"}
+    }
+  ]
+}

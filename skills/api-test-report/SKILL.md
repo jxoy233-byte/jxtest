@@ -35,13 +35,19 @@ The report contains:
    jxtest report test-results.json -o report.html
    ```
 
-2. **Preview** (optional):
+2. **Generate with trend vs a previous run**:
+   ```bash
+   jxtest report test-results.json --baseline test-results.prev.json -o report.html
+   ```
+   The HTML gets a "Trend vs baseline" section: per-metric deltas (passed / failed / errors), a list of regressed cases, a list of newly-fixed cases, and newly-added cases. No manual diffing.
+
+3. **Preview** (optional):
    ```bash
    open report.html   # macOS
    xdg-open report.html # Linux
    ```
 
-3. **Share**: the file is self-contained — email, Slack, PR comment, all work.
+4. **Share**: the file is self-contained — email, Slack, PR comment, all work.
 
 ## Rules
 

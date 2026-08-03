@@ -1,0 +1,32 @@
+{
+  "baseUrl": "http://localhost:8000",
+  "auth": {"type": "bearer", "token": "{{API_TOKEN}}"},
+  "recipes": [
+    {
+      "name": "create_user",
+      "method": "POST",
+      "path": "/api/v1/users",
+      "body": {
+        "username": "alice-{{$uuid}}",
+        "email":    "alice-{{$uuid}}@example.com",
+        "tenantId": "tenant-{{$rand:4}}"
+      },
+      "extract": {"user_id": "data.id"},
+      "returns": ["user_id"],
+      "cleanupPath": "/api/v1/users/{{user_id}}",
+      "expect_status": [200, 201, 202]
+    },
+    {
+      "name": "create_item",
+      "method": "POST",
+      "path": "/api/v1/items",
+      "body": {
+        "name":  "item-{{$uuid}}",
+        "price": 9.99
+      },
+      "extract": {"item_id": "data.id"},
+      "cleanupPath": "/api/v1/items/{{item_id}}",
+      "expect_status": [200, 201]
+    }
+  ]
+}
