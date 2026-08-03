@@ -74,8 +74,13 @@ That's it. No virtualenv, no Docker, no Node.js, no GUI.
 
 ## Highlights
 
-- **Envelope-aware assertions** — for APIs that wrap everything in HTTP 200 + business codes. `business_ok` / `business_not_ok` catch wrapped 5xx that plain status checks report as passing. One `--envelope 'code:0'` flag enables it end-to-end.
+- **Envelope-aware assertions** — for APIs that wrap everything in HTTP 200 + business codes. `business_ok` / `business_not_ok` catch wrapped 5xx that plain status checks report as passing. One `--envelope 'code:0'` flag enables it end-to-end. The runner auto-detects enveloped APIs and **refuses** to run with an actionable suggestion — silently inverting the pass/fail verdict is the most dangerous bug class.
 - **Declarative login auth** — replace `--pre-script` token injection with `auth: {type: login, url, body, tokenPath}` in `test-cases.json`. Tokens are cached, refreshed automatically on 401, and survive long test suites.
+- **AI contract workflow** — schema-less `requestBody` no longer means "guess and pray". `gen --contract-gap` surfaces what AI needs to fill in; `gen --contract contract.json` consumes AI-written field contracts; `run --contract` classifies failures into `data_issue` (contract gap) vs `real_defect`; `gen --contract-update` rolls classifications back into the contract.
+- **$ref resolution** — OpenAPI `components.schemas` chains resolve recursively (depth 5, cycles preserved as refs). No more "100 endpoints with `{$ref: ...}` body schemas" silently producing empty POSTs.
+- **Extract topological parallel** — when a case has `extract`, the runner builds a dependency graph and runs independent cases in parallel within their phase. No more "one case extracts → entire run goes sequential".
+- **Dynamic variables** — `{{$timestamp}}`, `{{$uuid}}`, `{{$randomInt}}`, `{{$iso}}` are evaluated fresh per substitution. Override via scope for deterministic snapshots.
+- **Isolated endpoints** — `meta.isolated: true` for logout / password-change / account-delete. Runner snapshots auth, gets a fresh token for the case only, then restores. No more "one logout poisons the whole run".
 - **Coverage that catches lies** — endpoint coverage alone hides the "we hit it, never saw its 422" gap. Coverage now reports declared-but-unseen response codes and (under envelope) outcome distribution.
 
 ## What's in the box

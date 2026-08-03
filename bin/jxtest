@@ -78,8 +78,11 @@ def main() -> None:
         print(f"jxtest: missing script: {script_path}", file=sys.stderr)
         sys.exit(1)
 
-    # Forward argv to the skill script and run it in-process
-    sys.path.insert(0, str(SKILLS))  # so `from _common import ...` works
+    # Forward argv to the skill script and run it in-process.
+    # Add both the skills root (so `from _common import ...` works) and the
+    # script's own dir (so sibling scripts like `contract.py` are importable).
+    sys.path.insert(0, str(SKILLS))
+    sys.path.insert(0, str(script_path.parent))
     sys.argv = [str(script_path), *sys.argv[2:]]
     runpy.run_path(str(script_path), run_name="__main__")
 

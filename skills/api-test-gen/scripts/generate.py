@@ -6,6 +6,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from contract import (
+    apply_contract_feedback, build_body_from_contract, gen_contract_gap, load_contract,
+)
+
 # Returned by _fill_body when an endpoint declares a body but gives no schema and
 # no example. Guessing a body for those produces cases that fail for reasons that
 # have nothing to do with the endpoint, so they get demoted instead.
@@ -17,9 +21,17 @@ def has_unusable_body(endpoint: dict) -> bool:
     return _fill_body(endpoint) is NO_SCHEMA
 
 
-def gen_positive(endpoint: dict) -> list[dict]:
-    """Happy-path case. Schema-less bodies get a 'must be rejected' case instead."""
+def gen_positive(endpoint: dict, contract_body: dict | None = None) -> list[dict]:
+    """Happy-path case. Schema-less bodies get a 'must be rejected' case instead,
+    unless a contract was supplied for this endpoint."""
     if has_unusable_body(endpoint):
+        if contract_body is not None:
+            # Contract gave us a body — treat it like a real schema and build
+            # a normal positive case.
+            return [_make_case(endpoint, id_suffix="positive",
+                               name_suffix="happy path (from contract)",
+                               category="positive",
+                               body_override=contract_body)]
         return [{
             "id": f"{endpoint['id']}_negative_empty_body",
             "endpointId": endpoint["id"],
@@ -31,7 +43,7 @@ def gen_positive(endpoint: dict) -> list[dict]:
             "query": {},
             "body": {},
             "assertions": [{"type": "business_not_ok"}],
-            "note": "spec declares no request body schema — add one to generate a happy-path case",
+            "note": "spec declares no request body schema — add a schema or contract to generate a happy-path case",
         }]
     return [_make_case(endpoint, id_suffix="positive", name_suffix="happy path", category="positive")]
 
@@ -233,13 +245,13 @@ def gen_format_validation(endpoint: dict) -> list[dict]:
     return cases
 
 
-def gen_idempotency(endpoint: dict) -> list[dict]:
+def gen_idempotency(endpoint: dict, contract_body: dict | None = None) -> list[dict]:
     """For POST/PUT, send same body twice → expect same status (idempotent)."""
     if endpoint["method"] not in ("POST", "PUT", "PATCH") or not endpoint.get("requestBody"):
         return []
-    if has_unusable_body(endpoint):
+    if has_unusable_body(endpoint) and contract_body is None:
         return []
-    pos = gen_positive(endpoint)[0]
+    pos = gen_positive(endpoint, contract_body=contract_body)[0]
     pos["id"] = f"{endpoint['id']}_idempotency"
     pos["name"] = f"{endpoint['method']} {endpoint['path']} - idempotent (2x same body)"
     pos["category"] = "idempotency"
@@ -416,31 +428,75 @@ def auto_auth(spec: dict) -> dict | None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Generate test cases from api-spec.json")
-    ap.add_argument("input", help="api-spec.json file")
+    ap.add_argument("input", nargs="?", help="api-spec.json file (ignored when --contract-update)")
     ap.add_argument("-o", "--output", default="test-cases.json", help="Output file")
     ap.add_argument("--categories", default="positive,negative,boundary,security,enum,format,idempotency",
                     help="Comma-separated categories to generate")
     ap.add_argument("--smoke", action="store_true",
                     help="Smoke profile: positive + 1 boundary per endpoint, no security/enum/format")
+    ap.add_argument("--contract", help="contract.json — fill bodies for schema-less endpoints from AI-supplied field contracts")
+    ap.add_argument("--contract-gap", action="store_true",
+                    help="Emit structured JSON of remaining schema-less endpoints (writes to --output and exits)")
+    ap.add_argument("--contract-update", metavar="FEEDBACK_JSON",
+                    help="Apply a contract-feedback.json to contract.json (path given via --contract) and exit")
     args = ap.parse_args()
+
+    # --- Mode: --contract-update (no generation) ---
+    if args.contract_update:
+        if not args.contract:
+            sys.exit("Error: --contract-update requires --contract <contract.json>")
+        contract = load_contract(args.contract)
+        feedback_doc = json.loads(Path(args.contract_update).read_text(encoding="utf-8"))
+        feedback = feedback_doc.get("feedback", []) if isinstance(feedback_doc, dict) else []
+        if not feedback:
+            sys.exit(f"Error: {args.contract_update} has no `feedback` array")
+        updated = apply_contract_feedback(contract, feedback)
+        Path(args.contract).write_text(json.dumps(updated, indent=2, ensure_ascii=False), encoding="utf-8")
+        applied = updated.get("_applied", [])
+        print(f"OK  applied {len(applied)} updates to {args.contract}", file=sys.stderr)
+        for a in applied[:10]:
+            print(f"    {a['endpointId']}.{a['field']}: {a['change']}", file=sys.stderr)
+        if len(applied) > 10:
+            print(f"    ... and {len(applied) - 10} more", file=sys.stderr)
+        sys.exit(0)
 
     src = Path(args.input)
     if not src.exists():
         sys.exit(f"Error: {src} not found")
     spec = json.loads(src.read_text(encoding="utf-8"))
 
+    # --- Mode: --contract-gap (structured gap report) ---
+    if args.contract_gap:
+        gap = gen_contract_gap(spec)
+        Path(args.output).write_text(json.dumps(gap, indent=2, ensure_ascii=False), encoding="utf-8")
+        n = gap["summary"]["gaps"]
+        print(f"OK  {n} schema-less endpoints  {args.output}", file=sys.stderr)
+        if n == 0:
+            print("    all endpoints have schemas — no contract needed", file=sys.stderr)
+        sys.exit(0)
+
     cats = set(args.categories.split(","))
     if args.smoke:
         # Smoke: just positive cases + 1 boundary per endpoint (faster CI)
         cats = {"positive", "boundary"}
     envelope = spec.get("envelope")
+    contract = load_contract(args.contract)
+    contract_fields = contract.get("contracts") or {}
     cases: list[dict] = []
     schema_less: list[str] = []
+    contract_filled: list[str] = []
     for ep in spec.get("endpoints", []):
-        if has_unusable_body(ep):
+        # If the endpoint has no usable body schema but does have a contract,
+        # synthesize a body from the contract's required fields.
+        contract_entry = contract_fields.get(ep["id"])
+        contract_body = build_body_from_contract(contract_entry.get("fields") if isinstance(contract_entry, dict) else None) \
+            if contract_entry and has_unusable_body(ep) else None
+        if contract_body is not None:
+            contract_filled.append(f"{ep['method']} {ep['path']}")
+        if has_unusable_body(ep) and contract_body is None:
             schema_less.append(f"{ep['method']} {ep['path']}")
         if "positive" in cats:
-            cases.extend(gen_positive(ep))
+            cases.extend(gen_positive(ep, contract_body=contract_body))
         if "negative" in cats:
             cases.extend(gen_missing_required(ep))
         if "boundary" in cats:
@@ -457,7 +513,7 @@ def main() -> None:
         if "format" in cats:
             cases.extend(gen_format_validation(ep))
         if "idempotency" in cats:
-            cases.extend(gen_idempotency(ep))
+            cases.extend(gen_idempotency(ep, contract_body=contract_body))
 
     out = {
         "version": "1.0",
@@ -485,9 +541,11 @@ def main() -> None:
         by_cat[c["category"]] = by_cat.get(c["category"], 0) + 1
     for cat, n in sorted(by_cat.items()):
         print(f"    {cat}: {n}", file=sys.stderr)
+    if contract_filled:
+        print(f"    filled from contract: {len(contract_filled)} endpoints", file=sys.stderr)
     if schema_less:
-        print(f"    no happy path for {len(schema_less)} endpoints (schema-less requestBody — "
-              f"add a schema to cover them):", file=sys.stderr)
+        print(f"    still missing: {len(schema_less)} endpoints (no schema, no contract — "
+              f"run `gen --contract-gap` for structured list):", file=sys.stderr)
         for ep in schema_less[:5]:
             print(f"      {ep}", file=sys.stderr)
         if len(schema_less) > 5:

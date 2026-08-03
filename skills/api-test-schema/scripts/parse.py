@@ -14,6 +14,11 @@ from _common import parse_envelope_arg
 
 METHODS = {"get", "post", "put", "delete", "patch", "head", "options"}
 
+# Maximum depth for $ref dereferencing. Beyond this we leave the node unresolved
+# to avoid pathological chains. Five is enough for any realistic spec; specs that
+# chain further usually have a cycle, which we also stop on.
+_REF_MAX_DEPTH = 5
+
 # URL patterns to strip from HAR paths (so /users/123 → /users/{id})
 URL_PATTERNS = [
     (re.compile(r"/\d+"), "/{id}"),                                        # /123
@@ -64,15 +69,70 @@ def detect(data: dict) -> str:
     raise ValueError(f"Unknown format. Top-level keys: {list(data.keys())[:5]}")
 
 
-def extract_params(params: list) -> list:
+def resolve_ref(node, components: dict, depth: int = 0, seen: set | None = None) -> dict | list | None | str | int | float | bool:
+    """Recursively resolve `$ref` pointers in `node` against the OpenAPI components lookup.
+
+    Local refs (`#/components/schemas/Foo`) are dereferenced in place. Cross-file and
+    remote refs pass through as `{"$ref": "..."}` so downstream consumers see the
+    unresolved reference rather than getting a silent empty value. Cycles and chains
+    longer than `_REF_MAX_DEPTH` likewise pass through.
+
+    Resolution recurses into dict values and list items, so a `properties.email.$ref`
+    inside an outer schema gets resolved just as readily as a top-level ref.
+    """
+    if seen is None:
+        seen = set()
+    if depth > _REF_MAX_DEPTH:
+        return node
+    if isinstance(node, dict):
+        if "$ref" in node:
+            ref = node["$ref"]
+            if not isinstance(ref, str):
+                return node
+            if not ref.startswith("#/"):
+                # External/remote ref: keep as-is, downstream can decide.
+                return node
+            if ref in seen:
+                return node  # cycle: stop
+            target = _lookup(components, ref)
+            if target is None:
+                return node  # dangling ref: keep verbatim
+            seen = seen | {ref}
+            return resolve_ref(target, components, depth + 1, seen)
+        return {k: resolve_ref(v, components, depth, seen) for k, v in node.items()}
+    if isinstance(node, list):
+        return [resolve_ref(v, components, depth, seen) for v in node]
+    return node
+
+
+def _lookup(components: dict, ref: str) -> dict | None:
+    """Resolve `#/components/<bucket>/<name>` against the parsed components section."""
+    parts = ref.lstrip("#/").split("/")
+    if len(parts) < 3 or parts[0] != "components":
+        return None
+    bucket = components.get(parts[1])
+    if not isinstance(bucket, dict):
+        return None
+    cur: object = bucket
+    for key in parts[2:]:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(key)
+    return cur if isinstance(cur, dict) else None
+
+
+def extract_params(params: list, components: dict | None = None) -> list:
+    components = components or {}
     out = []
-    for p in params:
+    for p in params or []:
         if not isinstance(p, dict):
             continue
-        if "$ref" in p:
-            out.append({"$ref": p["$ref"]})
+        p = resolve_ref(p, components)
+        if not isinstance(p, dict) or "$ref" in p:
+            # External ref or failed resolution: pass through so the caller sees what we got.
+            out.append({"$ref": p.get("$ref", "")} if isinstance(p, dict) else p)
             continue
-        schema = p.get("schema", {}) or {}
+        schema = resolve_ref(p.get("schema") or {}, components) or {}
         out.append({
             "name": p.get("name", ""),
             "in": p.get("in", "query"),
@@ -86,16 +146,26 @@ def extract_params(params: list) -> list:
     return out
 
 
-def extract_request_body(body: dict | None) -> dict | None:
+def extract_request_body(body: dict | None, components: dict | None = None) -> dict | None:
+    """Extract a request body, recursively dereferencing $ref against `components`.
+
+    A single resolve_ref pass over the whole body handles outer refs, content refs,
+    and schema refs together — running a second pass on just the inner schema gives
+    it a fresh depth budget and can resolve past `_REF_MAX_DEPTH`, so we don't.
+    """
+    components = components or {}
     if not body:
         return None
     if isinstance(body, str):
         return {"contentType": body, "schema": None, "example": None}
+    body = resolve_ref(body, components)
+    if not isinstance(body, dict):
+        return None
     content = body.get("content", {})
     if not content:
         return None
     ct = next(iter(content), "application/json")
-    media = content[ct]
+    media = content[ct] or {}
     return {
         "contentType": ct,
         "schema": media.get("schema"),
@@ -103,17 +173,28 @@ def extract_request_body(body: dict | None) -> dict | None:
     }
 
 
-def extract_responses(responses: dict) -> dict:
+def extract_responses(responses: dict, components: dict | None = None) -> dict:
+    """Extract per-status responses, dereferencing $ref against `components`.
+
+    Same single-pass approach as `extract_request_body`: one resolve_ref over the
+    outer response walks into nested content schemas without resetting the depth
+    budget for every level.
+    """
+    components = components or {}
     out = {}
-    for status, resp in responses.items():
+    for status, resp in (responses or {}).items():
+        if not isinstance(resp, dict):
+            continue
+        resp = resolve_ref(resp, components)
         if not isinstance(resp, dict):
             continue
         content = resp.get("content", {})
         schema = example = None
         if content:
             ct = next(iter(content), "application/json")
-            schema = content[ct].get("schema")
-            example = content[ct].get("example")
+            media = content[ct] or {}
+            schema = media.get("schema")
+            example = media.get("example")
         out[str(status)] = {
             "description": resp.get("description", ""),
             "schema": schema,
@@ -132,6 +213,15 @@ def parse_openapi(data: dict) -> dict:
         scheme = data.get("schemes", ["https"])[0]
         base_url = f"{scheme}://{data['host']}{data.get('basePath', '')}"
 
+    components = data.get("components") or {}
+    # Swagger 2.0 uses `definitions` instead of `components.schemas` and
+    # `parameters` instead of `components.parameters`. Fold both into the same
+    # lookup so the resolver doesn't care which version emitted the spec.
+    if "definitions" in data:
+        components.setdefault("schemas", {}).update(data.get("definitions") or {})
+    if "parameters" in data and isinstance(data["parameters"], dict):
+        components.setdefault("parameters", {}).update(data["parameters"])
+
     endpoints = []
     for path, methods in data.get("paths", {}).items():
         if not isinstance(methods, dict):
@@ -139,6 +229,9 @@ def parse_openapi(data: dict) -> dict:
         for method, op in methods.items():
             if method.lower() not in METHODS or not isinstance(op, dict):
                 continue
+            # Each extractor (extract_params / extract_request_body / extract_responses)
+            # does its own resolve_ref. Don't pre-resolve `op` here — that would
+            # double the depth budget and let chains past `_REF_MAX_DEPTH` slip through.
             endpoints.append({
                 "id": f"{method.upper()}_{path}",
                 "method": method.upper(),
@@ -147,9 +240,9 @@ def parse_openapi(data: dict) -> dict:
                 "tags": op.get("tags", []),
                 "summary": op.get("summary", ""),
                 "description": op.get("description", ""),
-                "parameters": extract_params(op.get("parameters", [])),
-                "requestBody": extract_request_body(op.get("requestBody") or op.get("consumes")),
-                "responses": extract_responses(op.get("responses", {})),
+                "parameters": extract_params(op.get("parameters", []), components),
+                "requestBody": extract_request_body(op.get("requestBody") or op.get("consumes"), components),
+                "responses": extract_responses(op.get("responses", {}), components),
                 "security": op.get("security", data.get("security", [])),
             })
 

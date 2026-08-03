@@ -98,6 +98,19 @@ class AuthProvider:
             self._headers = None
         return self.headers()
 
+    def snapshot(self) -> tuple:
+        """Save the current state so we can restore it after running an isolated
+        case. The first element is the current headers (or None if not yet built);
+        the second is whatever opaque data the provider needs to round-trip.
+        Returns (snapshot_token, snapshot_headers)."""
+        with self._lock:
+            return (self._headers, None)
+
+    def restore(self, snapshot: tuple) -> None:
+        """Restore the auth provider to a previous snapshot."""
+        with self._lock:
+            self._headers = snapshot[0]
+
     def _build(self) -> dict:
         auth = self.auth
         if not auth:

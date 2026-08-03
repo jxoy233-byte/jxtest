@@ -89,11 +89,55 @@ POST/PUT/PATCH endpoints that declare `requestBody` but no `schema` and no `exam
   "category": "negative",
   "body": {},
   "assertions": [{"type": "business_not_ok"}],
-  "note": "spec declares no request body schema — add one to generate a happy-path case"
+  "note": "spec declares no request body schema — add a schema or contract to generate a happy-path case"
 }
 ```
 
-This catches the "empty body → server 500" bug class without producing noise. Idempotency cases are skipped for the same endpoints. `gen` prints `no happy path for N endpoints` on stderr listing them, so coverage gaps stay visible.
+This catches the "empty body → server 500" bug class without producing noise. Idempotency cases are skipped for the same endpoints. `gen` prints `still missing: N endpoints (no schema, no contract — run `gen --contract-gap` for structured list)` on stderr.
+
+## AI contract workflow (schema-less → contract → feedback loop)
+
+The schema-less fallback catches a real defect ("API crashes on empty body") but can't generate a happy-path case because there's nothing to anchor on. The contract workflow gives AI a structured way to provide that anchor.
+
+```bash
+# 1. Find what's missing — emits structured JSON for AI to read
+jxtest gen api-spec.json --contract-gap -o contract-gap.json
+
+# 2. AI reads contract-gap.json, fills in field contracts, writes contract.json
+#    (schema below)
+
+# 3. Gen consumes contract.json to fill bodies for schema-less endpoints
+jxtest gen api-spec.json --contract contract.json -o test-cases.json
+# → "filled from contract: 2 endpoints"
+
+# 4. Run with feedback classification
+jxtest run test-cases.json --contract contract.json --contract-feedback feedback.json
+
+# 5. AI reads feedback.json (data_issue vs real_defect) → updates contract.json
+#    OR roll it back automatically:
+jxtest gen --contract-update feedback.json --contract contract.json
+# → "applied 1 updates to contract.json"
+```
+
+### `contract.json` format (v1.0)
+
+```json
+{
+  "version": "1.0",
+  "contracts": {
+    "POST_/api/v1/users": {
+      "fields": {
+        "username": {"type": "string", "required": true, "example": "alice", "unique": true},
+        "email":    {"type": "string", "format": "email", "required": true, "example": "a@b.com"}
+      },
+      "preconditions": ["auth required"],
+      "notes": "username must be unique within org"
+    }
+  }
+}
+```
+
+Only `required: true` fields are sent in the generated body (keeps it close to "what the real client would send"). Optional fields are dropped unless you set `required: true`.
 
 ## Auth auto-detect
 

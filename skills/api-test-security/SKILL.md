@@ -99,6 +99,22 @@ If the spec declares `envelope`, the `safe_response` assertion is evaluated agai
 jxtest security api-spec.json --envelope 'data.code:0,200'
 ```
 
+Custom `messagePath` (for APIs that use `msg` instead of `message`):
+
+```bash
+jxtest security api-spec.json --envelope 'code:0,200:msg'
+```
+
+### Envelope auto-detection
+
+If neither spec nor `--envelope` declare an envelope, `security` probes `/` once (configurable via `--envelope-probe`). If the body fits the `{code, msg/message}` pattern, the runner **refuses to run** (exit 2) — refusing a probe run when the API silently inverts the verdict is the whole point. To proceed:
+
+```bash
+jxtest security api-spec.json --envelope 'code:0:msg'                  # explicit
+jxtest security api-spec.json --envelope-suggested 'code:0'             # trust auto-detect
+jxtest security api-spec.json --envelope-probe ''                       # bypass detection
+```
+
 ## Design notes
 
 - Uses `_common` shared modules (http, auth, env, envelope)

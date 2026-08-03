@@ -194,6 +194,56 @@ jxtest run test-cases.json --base-url https://api.dev.com
 
 # Override per-run if needed:
 jxtest run test-cases.json --envelope 'data.code:0,200'
+
+# Custom message path (for APIs that use 'msg' instead of 'message'):
+jxtest run test-cases.json --envelope 'code:0,200:msg'
+
+# OR trust auto-detection. If neither spec nor CLI declare an envelope,
+# run/security probes `/` once. If the body fits the {code, msg} pattern,
+# the command REFUSES to run (exit 2) — refusing to silently invert the
+# pass/fail verdict is the whole point.
+jxtest run test-cases.json --envelope-suggested 'code:0'
+```
+
+### Pattern 9a: AI contract workflow (schema-less endpoints)
+
+For POST/PUT/PATCH endpoints whose spec declares `requestBody` but no `schema` and no `example`, gen can't generate a happy-path case. The contract workflow gives AI a structured way to provide the missing contract, then auto-apply the failure feedback back into the contract.
+
+```bash
+# 1. Surface what AI needs to fill in:
+jxtest gen api-spec.json --contract-gap -o contract-gap.json
+
+# 2. AI reads contract-gap.json, writes contract.json with field contracts:
+cat > contract.json <<'EOF'
+{"version":"1.0","contracts":{"POST_/users":{"fields":{
+  "username":{"type":"string","required":true,"example":"alice","unique":true},
+  "email":{"type":"string","format":"email","required":true,"example":"a@b.com"}}}}}
+EOF
+
+# 3. Gen now fills bodies for those endpoints:
+jxtest gen api-spec.json --contract contract.json -o test-cases.json
+# → "filled from contract: 1 endpoint"
+
+# 4. Run + classify failures as data_issue (contract gap) vs real_defect:
+jxtest run test-cases.json --contract contract.json -o results.json \
+        --contract-feedback feedback.json
+# → feedback.json tells AI exactly which fields to add/fix
+
+# 5. Auto-apply feedback into contract.json (one-shot):
+jxtest gen --contract-update feedback.json --contract contract.json
+# → "applied 1 updates to contract.json"
+```
+
+### Pattern 9b: Dynamic variables and isolated endpoints
+
+```bash
+# Dynamic vars — fresh per substitution, override via scope if you need determinism:
+{"headers": {"X-Request-ID": "{{$uuid}}"}, "body": {"batch": "{{$timestamp}}"}}
+
+# Mark self-destructive endpoints (logout, password change) so the runner
+# snapshots auth, fetches a fresh token for this case only, then restores:
+{"id": "logout", "method": "POST", "path": "/logout",
+ "meta": {"isolated": true}, "assertions": [{"type": "business_ok"}]}
 ```
 
 ### Pattern 9: Login flow without pre-scripts

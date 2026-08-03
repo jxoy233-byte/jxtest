@@ -21,12 +21,16 @@ Execute functional test cases against a live API. **The workhorse skill for AI-d
 | `--env <name>` | – | loads `env/<name>.json` + `global.json` |
 | `--base-url <url>` | – | overrides baseUrl in test-cases.json |
 | `--pre-script <file.py>` | – | Python `pre(ctx)` runs before each request |
-| `--config <file.json>` | – | `jxtest.config.json` for project defaults |
+| `--config <file.json>` | – | `jxtest.config.json` for project defaults (CLI > file > built-in) |
 | `--filter <categories>` | – | comma-separated (e.g. `positive,security`); overrides `--profile` |
 | `--profile <name>` | – | `smoke` = positive + boundary; `full` = all 7 categories |
-| `--envelope 'code:0'` | – | overrides the envelope config in test-cases.json / spec |
+| `--envelope 'code:0'` | – | overrides the envelope config in test-cases.json / spec. Trailing `:messagePath` (e.g. `'code:0:msg'`) overrides the default `message` field name. |
+| `--envelope-suggested 'code:0'` | – | trust an auto-detected envelope config and proceed (skips the refusal) |
+| `--envelope-probe <path>` | – | path used to probe envelope shape (default `/`; empty to skip) |
+| `--contract contract.json` | – | classify failures into `data_issue` (contract gap) vs `real_defect`; writes `--contract-feedback` |
+| `--contract-feedback <file>` | – | write the classification report (defaults to `<output>-feedback.json`) |
 | `--junit` | – | also write `test-results.xml` |
-| `--parallel N` | – | parallel workers (auto=1 if `extract` present) |
+| `--parallel N` | – | parallel workers (auto-topological for `extract` chains) |
 
 ## Output
 
@@ -100,11 +104,14 @@ Each case can carry `data: [...]`. Each row expands into a case variant — N ro
 Result IDs: `create_user#0`, `create_user#1`. Row overrides merge into `query` / `headers` / `body`.
 
 ### 5. Context passing (integration tests)
-Use `extract: {name: "$.jsonpath"}` to capture response values into a shared context. Subsequent cases can reference `{{name}}`. **Auto-switches to sequential mode** when any case has `extract`.
+Use `extract: {name: "$.jsonpath"}` to capture response values into a shared context. Subsequent cases can reference `{{name}}`. Cases are grouped into **phases by dependency**: cases in the same phase run in parallel; phases run sequentially. Independent cases (no extract deps) all land in phase 0.
+
+If an extract yields `None`, a `[extract] case X: var 'Y' not found via path 'Z'` warning is logged so silent None doesn't silently poison downstream.
 
 ```json
 {"id": "login", "method": "POST", "path": "/auth", "extract": {"token": "$.access_token"}}
 {"id": "profile", "method": "GET", "path": "/me", "headers": {"Authorization": "Bearer {{token}}"}}
+{"id": "health", "method": "GET", "path": "/health"}    // independent — runs in parallel with login
 ```
 
 ### 6. Pre-request scripts
@@ -138,7 +145,57 @@ Pass `--spec api-spec.json` to enable `schema_matches` against the spec's respon
 - `--filter 'security,idempotency'` — arbitrary comma list (overrides `--profile`)
 
 ### 10. Parallel execution
-Default `--parallel 4`. Reduces to 1 (sequential) when context passing is in use.
+Default `--parallel 4`. Cases with `extract` are **topologically grouped**: independent cases run in parallel, dependent chains run sequentially within the same run. No more "force sequential just because one case extracts".
+
+### 11. Dynamic variables (`{{$timestamp}}` etc.)
+Built-in vars evaluated fresh per substitution. Override by adding a scope entry of the same name.
+
+| Var | Example value |
+|-----|---------------|
+| `{{$timestamp}}` | `1785721961` |
+| `{{$iso}}` | `2026-08-03T01:42:41Z` |
+| `{{$uuid}}` / `{{$randomUUID}}` | `b640a90a-0c8f-439e-a3f9-7f8bb82c4e50` |
+| `{{$randomInt}}` | `30845` (1..1,000,000) |
+
+```json
+{"headers": {"X-Request-ID": "{{$uuid}}"}, "body": {"name": "user-{{$timestamp}}"}}
+```
+
+Note: dynamic vars are re-evaluated on each substitution. Two `{{$timestamp}}` in the same case can land on different seconds. To guarantee a snapshot within one case, pre-compute and inject via scopes.
+
+### 12. Isolated endpoints (`meta.isolated`)
+Mark a case as `meta.isolated: true` when it invalidates the auth token (logout, password change, account delete). The runner snapshots auth, fetches a fresh token for the case only, then restores — so a single logout case can't 401 the rest of the run.
+
+```json
+{"id": "logout", "method": "POST", "path": "/logout",
+ "meta": {"isolated": true},
+ "assertions": [{"type": "business_ok"}]}
+```
+
+### 13. Envelope auto-detection
+If neither `test-cases.json` nor `--envelope` declare an envelope, the runner probes `/` (configurable via `--envelope-probe`) once. If the response body looks like `{code, msg/message}`, the runner **refuses to run** with an actionable suggestion (exit 2):
+
+```
+[!] API looks enveloped — probe response had {{code, msg}} shape. ...
+    Re-run with:  --envelope 'code:0:msg'
+    Or trust auto-detection:  --envelope-suggested 'code:0'
+```
+
+To bypass detection (rarely needed): `--envelope-probe ''`.
+
+### 14. `--config <file>` for project defaults
+Persist common flags in a JSON file. CLI args always win over the file. Useful for keeping `--envelope` / `--env` / `--base-url` out of CI scripts.
+
+```json
+{
+  "env": "staging",
+  "base-url": "https://staging.api.example.com",
+  "envelope": "code:0,200:msg",
+  "parallel": 8,
+  "pre-script": "hooks/pre.py"
+}
+```
+`jxtest run test-cases.json --config jxtest.config.json`
 
 ## Usage
 

@@ -191,15 +191,21 @@ def render_markdown(cov: dict) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Compute test coverage from results")
     ap.add_argument("results", help="test-results.json")
-    ap.add_argument("--spec", required=True, help="api-spec.json")
+    ap.add_argument("--spec",
+                    help="api-spec.json (default: api-spec.json in same dir as results)")
     ap.add_argument("-o", "--output", help="Output Markdown report (optional)")
     ap.add_argument("--json", action="store_true", help="Output JSON instead of summary")
     args = ap.parse_args()
 
     results_path = Path(args.results)
-    spec_path = Path(args.spec)
     if not results_path.exists():
         sys.exit(f"Error: {results_path} not found")
+    if args.spec:
+        spec_path = Path(args.spec)
+    else:
+        spec_path = results_path.parent / "api-spec.json"
+        if not spec_path.exists():
+            sys.exit(f"Error: api-spec.json not found next to {results_path} — pass --spec")
     if not spec_path.exists():
         sys.exit(f"Error: {spec_path} not found")
 

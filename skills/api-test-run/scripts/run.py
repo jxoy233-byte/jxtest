@@ -13,8 +13,17 @@ from pathlib import Path
 from xml.sax.saxutils import escape, quoteattr
 
 from _common import (build_url, execute, resolve_auth, deep_resolve, load_env, apply_defaults,
-                     find_unresolved, get_json_path, load_envelope, parse_envelope_arg,
-                     classify, describe, business_code)
+                     find_unresolved, find_vars, get_json_path, load_envelope, parse_envelope_arg,
+                     classify, describe, business_code, detect_envelope)
+
+# Import the contract classifier from api-test-gen/scripts. We do this lazily
+# because not every run needs it.
+try:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "api-test-gen" / "scripts"))
+    from contract import load_contract as _load_contract, classify_failures as _classify_failures
+except Exception:
+    _load_contract = None
+    _classify_failures = None
 
 PROFILES = {
     "smoke": "positive,boundary",
@@ -155,6 +164,61 @@ def load_pre_script(path: str | None):
     return getattr(mod, "pre", lambda ctx: None)
 
 
+def _build_phases(cases: list[dict]) -> list[list[dict]]:
+    """Group cases into phases based on extract dependencies.
+
+    Phase 0: cases with no incoming extract deps (run in parallel).
+    Phase N: cases that depend on vars produced by Phase 0..N-1.
+
+    Cases are returned in input order within each phase for stable output.
+    Cycles fall back to sequential: if A depends on B and B depends on A, both
+    end up in the same phase and we let the user sort it out.
+    """
+    n = len(cases)
+    if n == 0:
+        return []
+    # producer[var] = index of case that produces it (first one wins)
+    producer: dict[str, int] = {}
+    for i, c in enumerate(cases):
+        for var in (c.get("extract") or {}).keys():
+            if var not in producer:
+                producer[var] = i
+
+    # For each case, the set of case-indices it depends on
+    deps: list[set[int]] = [set() for _ in range(n)]
+    for i, c in enumerate(cases):
+        # Vars the case references anywhere in its data
+        refs = find_vars(c)
+        for var in refs:
+            if var in producer and producer[var] != i:
+                deps[i].add(producer[var])
+
+    # Kahn-style topo: build phases by repeatedly peeling off cases whose
+    # deps are all in earlier phases
+    assigned_phase: list[int] = [-1] * n
+    current_phase = 0
+    remaining = set(range(n))
+    while remaining:
+        ready = [i for i in remaining if all(assigned_phase[d] >= 0 for d in deps[i] if d in remaining)]
+        if not ready:
+            # Cycle: put everything that's left into one phase
+            for i in remaining:
+                assigned_phase[i] = current_phase
+            current_phase += 1
+            remaining.clear()
+            break
+        for i in ready:
+            assigned_phase[i] = current_phase
+        remaining -= set(ready)
+        current_phase += 1
+
+    # Bucket by phase, preserving input order within each phase
+    phases: list[list[dict]] = [[] for _ in range(current_phase)]
+    for i, c in enumerate(cases):
+        phases[assigned_phase[i]].append(c)
+    return phases
+
+
 def expand_data_driven(cases: list[dict]) -> list[dict]:
     """Expand cases with `data: [...]` into N variants. Each row overrides query/headers/body."""
     expanded: list[dict] = []
@@ -183,13 +247,40 @@ def run_one(case: dict, base_url: str, auth, timeout: float, scopes: list[dict],
     # Inject context into scopes (between case-data and env) so {{token}} works
     full_scopes = ([{"values": context}] if context else []) + scopes
     resolved_case = deep_resolve(case_with_defaults, full_scopes)
+
+    # Isolated endpoint marker: this case invalidates the auth token (logout,
+    # password reset, account delete). Snapshot the current auth state, get
+    # a fresh token, run, then restore the original. Without this, a single
+    # logout case would 401 the entire rest of the run.
+    isolated = bool((case.get("meta") or {}).get("isolated"))
+    auth_snapshot = None
+    if isolated and auth.refreshable:
+        auth_snapshot = auth.snapshot()
+        auth._headers = None  # force refresh next call
+        auth_headers = auth.headers()
+        if auth_headers.get("error"):
+            return {"caseId": case["id"], "endpointId": case.get("endpointId", ""), "category": cat,
+                    "status": "error", "failureClass": "config_error",
+                    "error": f"isolated refresh failed: {auth_headers['error']}"}
+    else:
+        auth_headers = auth.headers()
+
+    try:
+        return _run_one_inner(case, resolved_case, auth_headers, base_url, auth, timeout,
+                              scopes, pre_hook, spec, defaults, context, envelope, cat)
+    finally:
+        if isolated and auth_snapshot is not None:
+            auth.restore(auth_snapshot)
+
+
+def _run_one_inner(case, resolved_case, auth_headers, base_url, auth, timeout, scopes,
+                   pre_hook, spec, defaults, context, envelope, cat):
     # Detect unresolved variables and fail gracefully (don't crash)
     unresolved = find_unresolved(resolved_case)
     if unresolved:
         return {"caseId": case["id"], "endpointId": case.get("endpointId", ""), "category": cat,
                 "status": "error", "failureClass": "config_error",
                 "error": f"unresolved variables: {', '.join(unresolved[:3])}"}
-    auth_headers = auth.headers()
     if auth_headers.get("error"):
         return {"caseId": case["id"], "endpointId": case.get("endpointId", ""), "category": cat,
                 "status": "error", "failureClass": "config_error", "error": auth_headers["error"]}
@@ -206,6 +297,8 @@ def run_one(case: dict, base_url: str, auth, timeout: float, scopes: list[dict],
         return {"caseId": case["id"], "endpointId": case.get("endpointId", ""), "category": cat,
                 "status": "error", "failureClass": "config_error", "error": f"pre-script: {e}"}
     headers = dict(ctx["headers"])
+    sent_headers = dict(headers)  # capture for result reporting (post-pre-hook)
+    _ = headers  # keep linter quiet; captured below for result reporting
 
     url = build_url(base_url, resolved_case["path"], resolved_case.get("query"))
     resp = execute(url, resolved_case["method"], headers, resolved_case.get("body"), timeout)
@@ -216,7 +309,8 @@ def run_one(case: dict, base_url: str, auth, timeout: float, scopes: list[dict],
         if resp.get("networkError"):
             return {"caseId": case["id"], "endpointId": case.get("endpointId", ""), "category": cat,
                     "status": "error", "failureClass": "network_error", "error": resp.get("error"),
-                    "request": {"method": resolved_case["method"], "url": url}}
+                    "request": {"method": resolved_case["method"], "url": url,
+                                "body": resolved_case.get("body")}}
     # Access tokens expire mid-run; re-authenticate once and retry.
     elif resp.get("status") == 401 and auth.refreshable and cat != "security":
         refreshed = auth.refresh()
@@ -236,14 +330,20 @@ def run_one(case: dict, base_url: str, auth, timeout: float, scopes: list[dict],
     else:
         failure = "server_error" if outcome == "server_error" else "assertion_failed"
 
-
     # Extract context for subsequent cases (only if passed; otherwise extracted None would pollute)
     extracted: dict = {}
     if context is not None and case.get("extract"):
         try:
             body_data = json.loads(resp.get("body") or "{}")
             for name, path in case["extract"].items():
-                extracted[name] = get_json_path(body_data, path)
+                val = get_json_path(body_data, path)
+                if val is None:
+                    # Silent failure is the worst kind — log so the user knows
+                    # why downstream cases that depend on this var are about
+                    # to fail with `unresolved variables`.
+                    print(f"[extract] case {case['id']}: var '{name}' not found via "
+                          f"path '{path}' — downstream cases may fail", file=sys.stderr)
+                extracted[name] = val
         except json.JSONDecodeError:
             pass
 
@@ -252,7 +352,9 @@ def run_one(case: dict, base_url: str, auth, timeout: float, scopes: list[dict],
             "outcome": outcome, "businessCode": business_code(resp, envelope),
             "durationMs": resp.get("durationMs"), "failureClass": None if passed else failure,
             "error": resp.get("error"),
-            "request": {"method": resolved_case["method"], "url": url},
+            "request": {"method": resolved_case["method"], "url": url,
+                        "headers": sent_headers,
+                        "body": resolved_case.get("body")},
             "response": None if is_network else {"status": resp.get("status"), "body": resp.get("body")},
             "assertions": assertion_results,
             "extracted": extracted}
@@ -289,10 +391,15 @@ def main() -> None:
     ap.add_argument("--profile", choices=sorted(PROFILES), help="Category preset: smoke | full")
     ap.add_argument("--pre-script", help="Python file with pre(case) hook")
     ap.add_argument("--spec", help="api-spec.json for schema validation")
-    ap.add_argument("--envelope", help="Business-code envelope, e.g. 'code:0' (overrides test-cases.json)")
+    ap.add_argument("--envelope", help="Business-code envelope, e.g. 'code:0' or 'code:0,200:msg' (overrides test-cases.json)")
+    ap.add_argument("--envelope-suggested", help="Trust an auto-detected envelope config and proceed without prompting. Same syntax as --envelope.")
+    ap.add_argument("--envelope-probe", default="/", help="Path used to probe the API for envelope shape (default '/'). Set to empty to skip.")
     ap.add_argument("--junit", action="store_true", help="Also write JUnit XML")
     ap.add_argument("--junit-output", default="test-results.xml")
     ap.add_argument("--config", help="jxtest.config.json (CLI args override)")
+    ap.add_argument("--contract", help="contract.json — classify failures into data_issue vs real_defect")
+    ap.add_argument("--contract-feedback", metavar="PATH",
+                    help="Write contract-feedback.json to PATH (requires --contract). Defaults to <output>-feedback.json")
     args = ap.parse_args()
 
     # Load config file (CLI > config > built-in defaults)
@@ -327,6 +434,32 @@ def main() -> None:
     envelope = parse_envelope_arg(args.envelope) if args.envelope else (load_envelope(data) or load_envelope(spec))
     if envelope:
         print(f"Envelope: {envelope['codePath']} in {envelope['successValues']} = success", file=sys.stderr)
+    elif args.envelope_suggested:
+        envelope = parse_envelope_arg(args.envelope_suggested)
+        print(f"Envelope: {envelope['codePath']} in {envelope['successValues']} = success (from --envelope-suggested)", file=sys.stderr)
+    elif args.envelope_probe and base_url:
+        # No envelope configured. Probe the API once: if the response body fits
+        # the envelope pattern, refuse to run so we don't silently invert the
+        # pass/fail verdict. Users can either pass --envelope explicitly or
+        # --envelope-suggested to trust auto-detection.
+        detected, probe = detect_envelope(base_url, args.envelope_probe)
+        if probe.get("networkError"):
+            print(f"Envelope probe failed: {probe.get('error')} — proceeding without envelope check", file=sys.stderr)
+        elif detected:
+            example = f"--envelope '{detected['codePath']}:{','.join(str(v) for v in detected['successValues'])}"
+            if detected.get("messagePath") and detected["messagePath"] != "message":
+                example += f":{detected['messagePath']}"
+            example += "'"
+            msg_path = detected.get("messagePath", "message")
+            sys.stderr.write(
+                "\n[!] API looks enveloped — probe response had {{code, "
+                + msg_path + "}} shape. Without an envelope\n"
+                "    config, business failures returned inside HTTP 200 will be\n"
+                "    reported as passing (a 92% pass rate can hide 30+ real bugs).\n\n"
+                f"    Re-run with:  {example}\n"
+                f"    Or trust auto-detection:  --envelope-suggested '{detected['codePath']}:{','.join(str(v) for v in detected['successValues'])}'\n\n"
+            )
+            sys.exit(2)
 
     pre_hook = load_pre_script(args.pre_script)
     defaults = data.get("defaults", {})
@@ -340,11 +473,16 @@ def main() -> None:
     # Expand data-driven: each `data` row becomes its own case variant
     cases = expand_data_driven(cases)
 
-    # Sequential if any case needs context extraction (results feed subsequent cases)
-    needs_context = any(c.get("extract") for c in cases)
-    parallel = 1 if needs_context else args.parallel
-    if needs_context and args.parallel > 1:
-        print(f"Context extraction detected: forcing sequential (parallel=1)", file=sys.stderr)
+    # Build extract-dependency graph. A case is "blocked" by another case if
+    # it references a {{var}} that the other case's `extract` produces. We
+    # group cases into phases: cases within a phase can run in parallel,
+    # phases run sequentially. Independent cases (no extract deps) all land
+    # in phase 0 and run together.
+    phases = _build_phases(cases)
+    parallel = args.parallel
+    if len(phases) > 1:
+        print(f"Extract topology: {len(phases)} phase(s); independent cases within each phase "
+              f"run in parallel (workers={parallel})", file=sys.stderr)
 
     started_iso = now_iso()
     t0 = time.perf_counter()
@@ -362,14 +500,27 @@ def main() -> None:
                     context[k] = v
         return result
 
-    if parallel == 1:
-        for c in cases:
-            results.append(run_sequential(c))
-    else:
-        with ThreadPoolExecutor(max_workers=parallel) as ex:
-            futures = {ex.submit(run_one, c, base_url, auth, args.timeout, scopes, pre_hook, spec, defaults, None, envelope): c for c in cases}
-            for fut in as_completed(futures):
-                results.append(fut.result())
+    for phase in phases:
+        if len(phase) == 1 or parallel == 1:
+            for c in phase:
+                results.append(run_sequential(c))
+        else:
+            with ThreadPoolExecutor(max_workers=min(parallel, len(phase))) as ex:
+                futures = {ex.submit(run_one, c, base_url, auth, args.timeout, scopes,
+                                     pre_hook, spec, defaults, None, envelope): c
+                           for c in phase}
+                phase_results: list[dict] = []
+                for fut in as_completed(futures):
+                    phase_results.append(fut.result())
+                # Order within phase matches input order for stable output
+                order = {id(c): i for i, c in enumerate(phase)}
+                phase_results.sort(key=lambda r: order.get(r.get("caseId"), 0))
+                for r in phase_results:
+                    if r.get("extracted"):
+                        for k, v in r["extracted"].items():
+                            if v is not None:
+                                context[k] = v
+                results.extend(phase_results)
     duration_ms = int((time.perf_counter() - t0) * 1000)
 
     passed = sum(1 for r in results if r["status"] == "passed")
@@ -387,6 +538,30 @@ def main() -> None:
     if args.junit:
         write_junit(results, args.junit_output, duration_ms)
 
+    # Contract feedback: classify failures into data_issue (contract gap) vs
+    # real_defect. Requires --contract; output path is auto-derived if not given.
+    if args.contract:
+        if not _classify_failures:
+            print("[contract] classifier not available — skipping feedback", file=sys.stderr)
+        else:
+            contract_doc = _load_contract(args.contract)
+            feedback = _classify_failures(results, contract_doc, envelope)
+            feedback_path = args.contract_feedback or (str(Path(args.output).with_suffix("")) + "-feedback.json")
+            feedback_out = {
+                "version": "1.0",
+                "summary": {
+                    "total_failures": sum(1 for r in results if r["status"] == "failed"),
+                    "data_issues": sum(1 for f in feedback if f["classification"] == "data_issue"),
+                    "real_defects": sum(1 for f in feedback if f["classification"] == "real_defect"),
+                },
+                "feedback": feedback,
+            }
+            Path(feedback_path).write_text(
+                json.dumps(feedback_out, indent=2, ensure_ascii=False), encoding="utf-8")
+            fb = feedback_out["summary"]
+            print(f"    contract feedback: {fb['data_issues']} data_issues + "
+                  f"{fb['real_defects']} real_defects  {feedback_path}", file=sys.stderr)
+
     s = out["summary"]
     print(f"OK  {s['total']} cases  {s['passed']} passed  {s['failed']} failed  {s['errors']} errors  {args.output}", file=sys.stderr)
     print(f"    duration: {duration_ms}ms  env: {args.env or '-'}", file=sys.stderr)
@@ -394,6 +569,25 @@ def main() -> None:
         print(f"    server errors: {server_errors} (5xx or envelope code in the 5xx range)", file=sys.stderr)
     if args.junit:
         print(f"    junit: {args.junit_output}", file=sys.stderr)
+
+    # Top-N failures: a 1-line summary is easy to miss when there are dozens of
+    # them. Print the first 10 with their failure class + a one-line hint so the
+    # next action is obvious.
+    if failed or errors:
+        failures = [r for r in results if r["status"] in ("failed", "error")]
+        print(f"    top failures ({len(failures)} total):", file=sys.stderr)
+        for r in failures[:10]:
+            cls = r.get("failureClass") or "?"
+            cat = r.get("category") or "?"
+            cid = r.get("caseId") or "?"
+            ep = r.get("endpointId") or "?"
+            obs = (r.get("response") or {}).get("body", "")
+            if obs and len(obs) > 120:
+                obs = obs[:120] + "..."
+            hint = obs.strip().splitlines()[0] if obs.strip() else r.get("error") or ""
+            print(f"      [{cls}/{cat}] {cid} ({ep}): {hint}", file=sys.stderr)
+        if len(failures) > 10:
+            print(f"      ... and {len(failures) - 10} more — see {args.output}", file=sys.stderr)
 
 
 

@@ -13,7 +13,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from _common import (build_url, execute, resolve_auth, load_env,
-                     load_envelope, parse_envelope_arg, classify, describe)
+                     load_envelope, parse_envelope_arg, classify, describe,
+                     detect_envelope)
 
 
 # Sensitive data patterns to scan response bodies
@@ -302,9 +303,12 @@ def main() -> None:
     ap.add_argument("--parallel", "-p", type=int, default=4)
     ap.add_argument("--include", help="Comma-separated attack types to include (default: all)",
                     default="idor,broken_auth,mass_assignment,path_traversal,ssrf,sensitive_data")
+    ap.add_argument("--exclude", help="Comma-separated attack types to skip (e.g. 'ssrf,path_traversal')")
     ap.add_argument("--token", help="Bearer token to send with every probe (skips spec auth)")
     ap.add_argument("--pre-script", help="Python file with pre(ctx) hook for custom auth")
-    ap.add_argument("--envelope", help="Business-code envelope, e.g. 'code:0' (overrides api-spec.json)")
+    ap.add_argument("--envelope", help="Business-code envelope, e.g. 'code:0' or 'code:0,200:msg' (overrides api-spec.json)")
+    ap.add_argument("--envelope-suggested", help="Trust an auto-detected envelope config and proceed")
+    ap.add_argument("--envelope-probe", default="/", help="Path used to probe envelope shape (default '/'); empty to skip")
     args = ap.parse_args()
 
 
@@ -319,6 +323,8 @@ def main() -> None:
 
     # Generate security test cases
     include = set(args.include.split(","))
+    if args.exclude:
+        include -= set(args.exclude.split(","))
     cases: list[dict] = []
     for ep in spec.get("endpoints", []):
         if "idor" in include:
@@ -347,6 +353,28 @@ def main() -> None:
                  f"       set `auth` in api-spec.json, or pass --token / --pre-script")
 
     envelope = parse_envelope_arg(args.envelope) if args.envelope else load_envelope(spec)
+    if not envelope and args.envelope_suggested:
+        envelope = parse_envelope_arg(args.envelope_suggested)
+        print(f"Envelope: {envelope['codePath']} in {envelope['successValues']} = success (from --envelope-suggested)", file=sys.stderr)
+    elif not envelope and args.envelope_probe and base_url:
+        detected, probe = detect_envelope(base_url, args.envelope_probe)
+        if probe.get("networkError"):
+            print(f"Envelope probe failed: {probe.get('error')} — proceeding without envelope check", file=sys.stderr)
+        elif detected:
+            example = f"--envelope '{detected['codePath']}:{','.join(str(v) for v in detected['successValues'])}"
+            if detected.get("messagePath") and detected["messagePath"] != "message":
+                example += f":{detected['messagePath']}"
+            example += "'"
+            msg_path = detected.get("messagePath", "message")
+            sys.stderr.write(
+                "\n[!] API looks enveloped — probe response had {{code, "
+                + msg_path + "}} shape. Without an envelope\n"
+                "    config, business failures returned inside HTTP 200 will be\n"
+                "    reported as 'safe', inverting the OWASP verdict.\n\n"
+                f"    Re-run with:  {example}\n"
+                f"    Or trust auto-detection:  --envelope-suggested '{detected['codePath']}:{','.join(str(v) for v in detected['successValues'])}'\n\n"
+            )
+            sys.exit(2)
     pre_hook = _load_pre_script(args.pre_script)
 
     print(f"Running {len(cases)} security probes on {len(spec.get('endpoints', []))} endpoints", file=sys.stderr)
@@ -394,6 +422,20 @@ def main() -> None:
         n = by_severity.get(sev, 0)
         if n:
             print(f"    {sev}: {n}", file=sys.stderr)
+    # Top findings: when there are dozens of medium-severity noise, the
+    # critical/high ones get drowned. Show them first.
+    if findings:
+        findings_sorted = sorted(findings,
+                                  key=lambda f: ({"critical": 0, "high": 1,
+                                                  "medium": 2, "low": 3}.get(f["severity"], 4),
+                                                  f["endpointId"]))
+        print(f"    top findings:", file=sys.stderr)
+        for f in findings_sorted[:10]:
+            tag = f["vulnerable"] and "VULN" or "ERR "
+            print(f"      [{tag}/{f['severity']}] {f['endpointId']} ({f['securityType']}): {f['evidence']}",
+                  file=sys.stderr)
+        if len(findings_sorted) > 10:
+            print(f"      ... and {len(findings_sorted) - 10} more — see {args.output}", file=sys.stderr)
     # Exit non-zero only for confirmed vulnerabilities
     confirmed_sev = {f["severity"] for f in confirmed}
     if "critical" in confirmed_sev:

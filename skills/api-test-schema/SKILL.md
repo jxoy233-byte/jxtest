@@ -86,9 +86,14 @@ CLI flags:
 
 - **Idempotent**: same input → same output.
 - **No fabrication**: missing schemas → `null`, never invented.
-- **Resolve `$ref` once**: inline references; keep cyclic refs as `{"$ref": "..."}`.
+- **Resolve `$ref`** recursively through `components.schemas` / `definitions` (Swagger 2.0). Chain depth is capped at 5; cyclic refs fall back to `{"$ref": "..."}`. Cross-file / remote refs are NOT resolved.
 - **Discards**: Postman scripts, vendor extensions, examples longer than 200 chars.
 - **Envelope hint, never auto-config**: success values are user-declared, not inferred.
+
+## Known limitations
+
+- Cross-file `$ref` (e.g. `#/other-file.yaml#/...`) — kept as `{"$ref": "..."}`, downstream tools cannot resolve.
+- Remote `$ref` URLs — kept as `{"$ref": "..."}`.
 
 ## Next step
 

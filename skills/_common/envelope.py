@@ -27,18 +27,55 @@ def load_envelope(doc: dict | None) -> dict | None:
 
 
 def parse_envelope_arg(arg: str) -> dict:
-    """Parse a CLI `--envelope 'code:0'` / `'data.code:0,200'` argument."""
+    """Parse a CLI `--envelope 'code:0'` / `'data.code:0,200'` / `'code:0,200:msg'` argument.
+
+    Syntax:
+        <codePath>:<successValue>[,<successValue>...] [ :<messagePath>]
+
+    The trailing `:messagePath` segment is optional. When present, it overrides
+    the default `message` field name (useful for APIs that use `msg` or
+    `error_message`). Strings without a trailing `:X` keep the historical default
+    so existing callers don't break.
+
+    Examples:
+        "code:0"                  → codePath=code,    success=[0],    msg="message"
+        "data.code:0,200"         → codePath=data.code, success=[0,200], msg="message"
+        "code:0,200:msg"          → codePath=code,    success=[0,200], msg="msg"
+    """
+    # Trailing `:msg` segment: only treat the part after the LAST `:` as messagePath
+    # when there's no comma inside it. This keeps `data.code:0,200` parsing the
+    # same as before.
+    head, _, tail = arg.rpartition(":")
+    if "," not in tail and tail and not tail.lstrip("-").isdigit() and tail.strip():
+        # Could be a messagePath — but only if the part before it parsed cleanly
+        # as `<path>:<values>`. If the head still has a `:`, that's the values
+        # separator and the tail is the messagePath.
+        body_part, _, msg_part = head.rpartition(":")
+        if msg_part and "," in body_part or "code" in body_part.lower():
+            # body_part is `<codePath>:<comma-separated success>` and msg_part is messagePath
+            path, _, values = body_part.partition(":")
+            path = path.strip()
+            success = _parse_success_values(values)
+            return {"codePath": path, "successValues": success or [0],
+                    "messagePath": tail.strip()}
+
+    # Default path: <codePath>:<successValue>[,<successValue>...]
     path, _, values = arg.partition(":")
     path = path.strip()
     if not path:
         raise ValueError("envelope needs a code path, e.g. 'code:0'")
-    success: list = []
-    for raw in values.split(","):
+    success = _parse_success_values(values)
+    return {"codePath": path, "successValues": success or [0], "messagePath": "message"}
+
+
+def _parse_success_values(values: str) -> list:
+    out: list = []
+    for raw in (values or "").split(","):
         raw = raw.strip()
         if not raw:
             continue
-        success.append(int(raw) if raw.lstrip("-").isdigit() else raw)
-    return {"codePath": path, "successValues": success or [0], "messagePath": "message"}
+        out.append(int(raw) if raw.lstrip("-").isdigit() else raw)
+    return out
 
 
 def _body_json(resp: dict):
@@ -108,3 +145,51 @@ def describe(resp: dict, cfg: dict | None) -> str:
         if msg:
             parts.append(f"({msg[:80]})")
     return " ".join(parts)
+
+
+def looks_like_envelope(body_json: dict) -> dict | None:
+    """Inspect a parsed JSON body and return a candidate envelope config if it matches.
+
+    Heuristic: the top-level object must contain a numeric-or-string `code` field
+    AND a sibling that's named `message` or `msg`. The observed `code` value
+    becomes the suggested `successValues[0]` so the caller can pass it back via
+    `--envelope-suggested`.
+
+    Returns None when the body doesn't fit the pattern. Callers (run/security)
+    decide whether to refuse the run or proceed.
+    """
+    if not isinstance(body_json, dict):
+        return None
+    has_code = "code" in body_json
+    msg_key = "message" if "message" in body_json else ("msg" if "msg" in body_json else None)
+    if not has_code or not msg_key:
+        return None
+    code_val = body_json["code"]
+    if code_val is None:
+        return None
+    success = [code_val] if isinstance(code_val, (int, str)) and code_val != "" else [0]
+    return {"codePath": "code", "successValues": success, "messagePath": msg_key}
+
+
+def detect_envelope(base_url: str, probe_path: str = "/") -> tuple[dict | None, dict | None]:
+    """Probe the API and return (envelope_cfg, probe_response).
+
+    Sends a single GET request to `<base_url><probe_path>` and inspects the body.
+    On success the cfg is what `looks_like_envelope` returned. On probe failure
+    (network error, non-JSON, non-matching body) returns `(None, probe_response)`
+    so the caller can distinguish "didn't detect" from "couldn't probe".
+
+    Network errors are deliberately non-fatal: we don't want a probe failure to
+    block legitimate runs against flaky servers.
+    """
+    from .http import build_url, execute
+    url = build_url(base_url.rstrip("/") + "/" if not base_url.endswith("/") else base_url, probe_path.lstrip("/"))
+    resp = execute(url, "GET", {"Accept": "application/json"}, None, 5.0)
+    if resp.get("networkError"):
+        return None, resp
+    try:
+        body = json.loads(resp.get("body") or "")
+    except (json.JSONDecodeError, TypeError):
+        return None, resp
+    cfg = looks_like_envelope(body)
+    return cfg, resp
