@@ -71,8 +71,8 @@
 **集成层：**
 - CLI 工具
 - Makefile 脚本
-- GitHub Actions 示例
-- Docker 镜像
+
+> GitHub Actions 示例、Docker 镜像等外部集成资产计划在 v1.5 (Phase 2) 提供——v1 阶段以本地 `make` 流程为 CI 入口即可。
 
 ### ❌ 不做（Non-Goals）
 
@@ -197,9 +197,9 @@
 
 整个 v1.0 完成的标志：
 - ✅ 跑通 petstore 完整示例（schema → gen → run → report）
-- ✅ 至少 1 个 Skill 包含 LLM 增强（heal / mock）
+- ✅ 至少 1 个 Skill 包含启发式智能（heal 自动安全修复 / mock 智能选择行为）
 - ✅ 文档齐全（README + GUIDELINE + 每 Skill SKILL.md）
-- ✅ CI 集成示例（GitHub Actions）
+- ⬜ CI 集成示例（GitHub Actions workflow 待补；当前 `make ci` 可作为本地入口）
 
 ## 风险与应对（Risks）
 

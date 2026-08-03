@@ -1,11 +1,11 @@
 ---
 name: api-test-heal
-description: Analyze `test-results.json` failures with LLM-driven diagnosis and auto-apply safe fixes. Use this skill after `/api-test-run` produced results, when the user asks "why did these fail", "fix the tests", "self-heal".
+description: Analyze `test-results.json` failures and auto-apply safe heuristic fixes to assertion patterns. Use this skill after `/api-test-run` produced results, when the user asks "why did these fail", "fix the tests", "self-heal". The AI agent interprets remaining failures — the script handles deterministic patterns only.
 ---
 
 # api-test-heal
 
-LLM-driven failure analysis. The script does the **heuristic first pass** (auto-fix safe patterns); the AI does the **diagnosis** (explain why and suggest non-obvious fixes).
+Heuristic-based failure analysis. The script applies **safe auto-fixes** (e.g. loosen an over-strict regex, swap a stale status code, retry a flaky endpoint). An AI agent interprets the remaining failures — read the `diagnosis` field in each result and decide what to change in `test-cases.json`.
 
 ## When to invoke
 

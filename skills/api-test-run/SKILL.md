@@ -1,6 +1,6 @@
 ---
 name: api-test-run
-description: Execute test cases from `test-cases.json` against a live API. Supports env vars, OAuth2 / login auth, pre-request scripts, data-driven testing, context passing between cases, 20+ assertion types (incl. envelope-aware business_ok / business_not_ok), JUnit XML reports, schema validation. Use after `/api-test-gen` produced test cases.
+description: Execute test cases from `test-cases.json` against a live API. Supports env vars, OAuth2 / login auth, pre-request scripts, data-driven testing, context passing between cases, 22 assertion types (incl. envelope-aware business_ok / business_not_ok), JUnit XML reports, schema validation. Use after `/api-test-gen` produced test cases.
 ---
 
 # api-test-run
@@ -23,7 +23,7 @@ Execute functional test cases against a live API. **The workhorse skill for AI-d
 | `--pre-script <file.py>` | – | Python `pre(ctx)` runs before each request |
 | `--config <file.json>` | – | `jxtest.config.json` for project defaults (CLI > file > built-in) |
 | `--filter <categories>` | – | comma-separated (e.g. `positive,security`); overrides `--profile` |
-| `--profile <name>` | – | `smoke` = positive + boundary; `full` = all 7 categories |
+| `--profile <name>` | – | `smoke` = positive + boundary; `full` = all 5 categories |
 | `--envelope 'code:0'` | – | overrides the envelope config in test-cases.json / spec. Trailing `:messagePath` (e.g. `'code:0:msg'`) overrides the default `message` field name. |
 | `--envelope-suggested 'code:0'` | – | trust an auto-detected envelope config and proceed (skips the refusal) |
 | `--envelope-probe <path>` | – | path used to probe envelope shape (default `/`; empty to skip) |
@@ -171,7 +171,7 @@ A ready-to-edit example ships in the repo. Copy it, edit the functions, pass via
 
 ### 9. Profiles
 - `--profile smoke` — positive + boundary (fast CI subset)
-- `--profile full` — all 7 categories (default for `make ci`)
+- `--profile full` — all 5 categories (default for `make ci`)
 - `--filter 'security,idempotency'` — arbitrary comma list (overrides `--profile`)
 
 ### 10. Parallel execution

@@ -1,6 +1,6 @@
 # jxtest
 
-**AI-driven API testing toolkit.** From any OpenAPI/Postman/HAR spec, one CLI (`jxtest <cmd>`) generates 7 categories of tests, runs functional/load/security suites, blocks breaking changes, finds coverage gaps, and self-heals failures. Replaces Postman for automated workflows; adds load testing, OWASP scanning, envelope-aware assertions (HTTP 200 + `body.code` APIs), declarative login auth, and AI-friendly analysis that Postman doesn't have.
+**AI-driven API testing toolkit.** From any OpenAPI/Postman/HAR spec, one CLI (`jxtest <cmd>`) generates 5 categories of tests, runs functional/load/security suites, blocks breaking changes, finds coverage gaps, and self-heals failures. Replaces Postman for automated workflows; adds load testing, OWASP scanning, envelope-aware assertions (HTTP 200 + `body.code` APIs), declarative login auth, and AI-friendly analysis that Postman doesn't have.
 
 > **For AI agents**: read [`SKILL.md`](./SKILL.md) — it's the canonical instruction manual for driving jxtest from an LLM.
 
@@ -51,7 +51,7 @@ copy bin\jxtest %LOCALAPPDATA%\Programs\Python\Python311\Scripts\jxtest.cmd
 ### Verify
 
 ```bash
-jxtest --help       # shows all 12 commands
+jxtest --help       # shows all 17 commands
 jxtest --version    # 1.0
 ```
 
@@ -95,7 +95,7 @@ That's it. No virtualenv, no Docker, no Node.js, no GUI.
 | Skill | What it does |
 |-------|--------------|
 | `schema` | Parse OpenAPI / Postman / HAR → `api-spec.json` |
-| `gen` | Generate 7 categories of test cases from spec |
+| `gen` | Generate 5 categories of test cases from spec |
 | `validate` | Validate `test-cases.json` structure |
 | `env` | Manage env files + `{{var}}` templating |
 | `mock` | Stateful mock server from spec |
@@ -104,7 +104,7 @@ That's it. No virtualenv, no Docker, no Node.js, no GUI.
 | `security` | OWASP API Top 10 probes (IDOR / auth / SSRF / PII) + fix recipes + `--rules` |
 | `diff` | Compare two specs → breaking changes + migration guide |
 | `coverage` | Coverage gaps (endpoints / methods / categories / statuses) |
-| `heal` | Self-heal failed assertions (heuristic + LLM) |
+| `heal` | Self-heal failed assertions (heuristic) |
 | `report` | Self-contained HTML report + trend delta vs baseline |
 | `doc` | Markdown API docs |
 | `scenario` | E2E business flow (login → action → verify) |
@@ -148,7 +148,7 @@ Single CLI entry: `jxtest <command>`. JSON in, JSON out. Exit codes 0/1/2 for CI
 | Postman | k6 | jxtest |
 |---------|----|--------|
 | Mouse-click UI | Pure load | **Single CLI for everything** |
-| Manual test writing | Manual scripts | **Auto-generate 7 categories** |
+| Manual test writing | Manual scripts | **Auto-generate 5 categories** |
 | Static assertions | None | **16+ assertion types** |
 | Read error trace | Numbers only | **AI-friendly analysis with recommendations** |
 | No security scans | No security scans | **OWASP Top 10 built-in** |
@@ -161,7 +161,7 @@ Single CLI entry: `jxtest <command>`. JSON in, JSON out. Exit codes 0/1/2 for CI
 1. **Stdlib-only** — `urllib`, `http.server`, `json`, `threading`. No `requests`, no `aiohttp`, no Node.js. One dependency: `pyyaml`.
 2. **AI-first** — every command takes JSON in, returns JSON out. AI agents can drive end-to-end without screen scraping.
 3. **CI-native** — exit codes 0/1/2, JUnit XML, structured logs. Any CI (GitHub / GitLab / Jenkins / CircleCI / Azure) consumes the output with `cat test-results.xml`.
-4. **Token-efficient** — one master `SKILL.md` (~250 lines), per-skill `SKILL.md` (~50-100 lines each). No bloat.
+4. **Token-efficient** — one master `SKILL.md` (~600 lines), per-skill `SKILL.md` (~50-100 lines each). No bloat.
 
 ## For AI agents
 

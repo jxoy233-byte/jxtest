@@ -1,6 +1,6 @@
 ---
 name: jxtest
-description: AI-driven API testing toolkit that replaces Postman for automated workflows. From an OpenAPI/Postman/HAR spec, one CLI (`jxtest <cmd>`) parses the spec, auto-generates 7 categories of test cases (positive/negative/boundary/security/enum/format/idempotency), runs functional tests with 16+ assertion types, executes load tests with AI-friendly analysis, scans for OWASP API Top 10 vulnerabilities, diffs specs to block breaking changes, identifies test coverage gaps, and self-heals failed assertions. Stdlib-only Python (no requests/aiohttp), JSON in/out, CI-friendly exit codes 0/1/2, JUnit XML output. Use when user wants to test an API end-to-end, load test it, scan it for security issues, detect breaking changes between spec versions, analyze coverage gaps, or fix failing assertions.
+description: AI-driven API testing toolkit that replaces Postman for automated workflows. From an OpenAPI/Postman/HAR spec, one CLI (`jxtest <cmd>`) parses the spec, auto-generates 5 categories of test cases (positive/negative/boundary/security/idempotency), runs functional tests with 22 assertion types, executes load tests with AI-friendly analysis, scans for OWASP API Top 10 vulnerabilities, diffs specs to block breaking changes, identifies test coverage gaps, and self-heals failed assertions via heuristic. Stdlib-only Python (no requests/aiohttp), JSON in/out, CI-friendly exit codes 0/1/2, JUnit XML output. Use when user wants to test an API end-to-end, load test it, scan it for security issues, detect breaking changes between spec versions, analyze coverage gaps, or fix failing assertions.
 ---
 
 # jxtest — AI-Driven API Testing
@@ -14,13 +14,13 @@ You are an AI agent with access to the `jxtest` CLI. Your job: take a spec + a b
 jxtest replaces Postman/Insomnia for AI-driven workflows. From an OpenAPI/Postman/HAR spec, it:
 
 1. **Parses** the spec into `api-spec.json` (auto-detects enveloped APIs)
-2. **Generates** 7 categories of test cases (positive / negative / boundary / security / enum / format / idempotency), with envelope-aware assertions
-3. **Runs** functional tests with **20+ assertions** (incl. `business_ok` / `business_not_ok` for enveloped APIs, `json_path_regex` / `json_path_length` / `custom` for advanced checks, `error_structure` for error contracts), OAuth2 / login, env vars, data-driven, context passing
+2. **Generates** 5 categories of test cases (positive / negative / boundary / security / idempotency), with envelope-aware assertions
+3. **Runs** functional tests with **22 assertions** (incl. `business_ok` / `business_not_ok` for enveloped APIs, `json_path_regex` / `json_path_length` / `custom` for advanced checks, `error_structure` for error contracts), OAuth2 / login, env vars, data-driven, context passing
 4. **Loads** under concurrent VUs with **AI-friendly analysis** (bottlenecks, slow requests, error breakdown, recommendations) + SLA + baseline + step-up capacity testing
 5. **Scans** for OWASP API Top 10 vulnerabilities (IDOR, broken auth, SSRF, PII exposure) — envelope-aware so real bugs don't masquerade as findings; each finding now ships with a **concrete remediation snippet** and a `--rules` hook for custom probes
 6. **Diffs** two specs to detect breaking changes
 7. **Reports coverage gaps** (endpoints / methods / categories / declared response codes / business outcomes)
-8. **Heals** failed assertions via heuristic + LLM
+8. **Heals** failed assertions via heuristic
 9. **Reports** HTML (+ trend delta vs baseline) + JUnit XML + Markdown
 10. **Generates scenario flows** (`scenario`) — login → action → verify chains, not just single-shot requests
 11. **Manages test data** (`factory`) — generates unique synthetic data per test and **auto-cleans up** what the suite created, so CI leaves no rows behind
@@ -28,7 +28,7 @@ jxtest replaces Postman/Insomnia for AI-driven workflows. From an OpenAPI/Postma
 
 **Single CLI**: `jxtest <command> [args]`. Forward args; structured JSON in, structured JSON out.
 
-## The 12 CLI commands (the only thing you need to remember)
+## The 17 CLI commands (the only thing you need to remember)
 
 | Command | Purpose |
 |---------|---------|
@@ -47,6 +47,7 @@ jxtest replaces Postman/Insomnia for AI-driven workflows. From an OpenAPI/Postma
 | `doc` | Markdown API docs |
 | `scenario` | Generate end-to-end business flow (login → action → verify) |
 | `factory` | Generate unique data + auto-cleanup after the run |
+| `suite` | Save/run named test-suite filter presets |
 | `completion` | Print shell completion script (bash \| zsh \| fish) |
 
 ## Standard workflow (run these in order)
@@ -529,16 +530,16 @@ jxtest/
 ├── README.md                 ← user-facing docs
 ├── guideline.md              ← development goals
 ├── Makefile                  ← `make ci` runs full pipeline
-├── bin/jxtest                ← unified CLI (~85 lines)
+├── bin/jxtest                ← unified CLI (~100 lines)
 ├── examples/                 ← petstore spec, factory recipe, custom asserts, security rules
 └── skills/
     ├── api-test-schema/      ← parse OpenAPI/Postman/HAR → api-spec.json
     ├── api-test-env/         ← environment files + {{var}} templating
     ├── api-test-mock/        ← stateful mock server
-    ├── api-test-gen/         ← 7 categories of test cases
+    ├── api-test-gen/         ← 5 categories of test cases
     ├── api-test-run/         ← functional runner (data + context + custom asserts)
     ├── api-test-load/        ← load + SLA + baseline + step-up capacity
-    ├── api-test-heal/        ← LLM-driven self-healing
+    ├── api-test-heal/        ← heuristic self-healing
     ├── api-test-security/    ← OWASP API Top 10 + fix recipes + custom rules
     ├── api-test-diff/        ← contract diffing
     ├── api-test-report/      ← HTML report with trend delta

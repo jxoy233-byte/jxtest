@@ -1,6 +1,6 @@
 ---
 name: api-test-gen
-description: Generate test cases from a normalized `api-spec.json`. Produces structured test cases covering positive, negative, boundary, security, enum, format, and idempotency scenarios. Honors envelope / auth blocks. Use this skill after `/api-test-schema` has produced a spec, or when the user asks to "generate test cases", "create test scenarios", "derive tests from API".
+description: Generate test cases from a normalized `api-spec.json`. Produces structured test cases covering positive, negative, boundary, security, and idempotency scenarios. Honors envelope / auth blocks. Use this skill after `/api-test-schema` has produced a spec, or when the user asks to "generate test cases", "create test scenarios", "derive tests from API".
 ---
 
 # api-test-gen
@@ -52,9 +52,9 @@ Generate test cases from `api-spec.json`. Combines deterministic rule-based gene
 - `negative` — missing required, wrong type; expects rejection — **never** a 5xx (server error = real bug, surfaces as failure)
 - `boundary` — empty, max length, type-from-string, numeric overflow; expects 2xx or 4xx
 - `security` — SQL injection, XSS, auth bypass, IDOR
-- `enum` — one positive per enum value (so spec coverage = 100%)
-- `format` — valid email / uuid / uri / date-time samples
 - `idempotency` — for POST/PUT, send same body twice; skipped on schema-less bodies
+
+> **Note** — `enum` and `format` categories are reserved for a future release (would emit one positive per enum value and valid/invalid samples for email/uuid/uri/date-time fields respectively). Not yet implemented in `gen`; do not promise these to users until they ship.
 
 ## Steps
 
