@@ -108,6 +108,70 @@ def cmd_resolve(args: argparse.Namespace) -> None:
     print(resolve_vars(args.template, scopes))
 
 
+def cmd_test(args: argparse.Namespace) -> None:
+    """End-to-end check that an env file is wired correctly.
+
+    The most common reason auth fails on first run is that the env vars are
+    wrong (typo, expired password, wrong endpoint). Instead of waiting until
+    `jxtest run` to discover this, run a dry probe here — base URL reachable,
+    login endpoint answers, token can be fetched, all in one command.
+    """
+    import json as _json
+    import sys as _sys
+    import urllib.error as _ur
+    import urllib.request as _urq
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+    from _common import resolve_auth, execute, build_url
+
+    try:
+        env_doc = load_env(args.name)
+    except SystemExit as e:
+        print(f"  ✗ env: {e}")
+        _sys.exit(2)
+
+    base_url = env_doc.get("baseUrl", "").rstrip("/")
+    if not base_url:
+        print(f"  ✗ {args.name} has no baseUrl — run `jxtest env create {args.name} --base-url <URL>`")
+        _sys.exit(1)
+
+    # Check 1: base URL is reachable
+    print(f"  Checking {args.name} → {base_url}")
+    try:
+        req = _urq.Request(base_url + "/", method="GET")
+        with _urq.urlopen(req, timeout=5) as r:
+            print(f"  ✓ baseUrl reachable (HTTP {r.status})")
+    except Exception as e:
+        print(f"  ✗ baseUrl unreachable: {type(e).__name__}: {e}")
+        if not args.no_fail:
+            _sys.exit(1)
+        return
+
+    # Check 2: login (if a test-cases.json auth block is available and login-style)
+    auth_block = None
+    if args.cases and Path(args.cases).exists():
+        try:
+            cases_doc = _json.loads(Path(args.cases).read_text(encoding="utf-8"))
+            auth_block = cases_doc.get("auth")
+        except Exception:
+            pass
+    if auth_block and auth_block.get("type") == "login":
+        print(f"  → login probe: POST {auth_block.get('url', '/auth/login')}")
+        auth = resolve_auth(auth_block, [env_doc], base_url)
+        h = auth.headers()
+        if h.get("error"):
+            err = h["error"].split("\n")[0]
+            print(f"  ✗ login failed: {err}")
+            print(f"      full error: see 'jxtest run --custom-asserts' for details")
+            if not args.no_fail:
+                _sys.exit(1)
+        else:
+            token_preview = (h.get("Authorization") or "").replace("Bearer ", "")[:12]
+            print(f"  ✓ login OK (token={token_preview}...)")
+
+    print(f"  → run tests:  jxtest run test-cases.json --env {args.name} --base-url {base_url}")
+
+
 def cmd_validate(args: argparse.Namespace) -> None:
     """Check that env values cover all {{var}} used in test-cases.json."""
     if not args.spec:
@@ -163,9 +227,15 @@ def main() -> None:
     p_val = sub.add_parser("validate", help="Validate envs cover spec vars")
     p_val.add_argument("--spec", required=True)
 
+    p_test = sub.add_parser("test", help="Probe env config end-to-end (reachability + login)")
+    p_test.add_argument("name")
+    p_test.add_argument("--cases", help="test-cases.json with auth block to validate")
+    p_test.add_argument("--no-fail", action="store_true", help="Don't exit non-zero on failures (CI debug)")
+
     args = ap.parse_args()
     {"list": cmd_list, "show": cmd_show, "create": cmd_create,
-     "set": cmd_set, "resolve": cmd_resolve, "validate": cmd_validate}[args.cmd](args)
+     "set": cmd_set, "resolve": cmd_resolve, "validate": cmd_validate,
+     "test": cmd_test}[args.cmd](args)
 
 
 if __name__ == "__main__":

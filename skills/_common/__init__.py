@@ -7,6 +7,7 @@ from .jsonpath import get_json_path
 from .envelope import (
     load_envelope, parse_envelope_arg, classify, describe,
     business_code, business_message, looks_like_envelope, detect_envelope,
+    resolve_envelope_for_case,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "load_envelope", "parse_envelope_arg", "classify", "describe",
     "business_code", "business_message",
     "looks_like_envelope", "detect_envelope",
+    "resolve_envelope_for_case",
 ]

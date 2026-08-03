@@ -14,7 +14,8 @@ from xml.sax.saxutils import escape, quoteattr
 
 from _common import (build_url, execute, resolve_auth, deep_resolve, load_env, apply_defaults,
                      find_unresolved, find_vars, get_json_path, load_envelope, parse_envelope_arg,
-                     classify, describe, business_code, detect_envelope)
+                     classify, describe, business_code, detect_envelope,
+                     resolve_envelope_for_case)
 
 # Import the contract classifier from api-test-gen/scripts. We do this lazily
 # because not every run needs it.
@@ -203,6 +204,10 @@ def run_custom_assertion(assertion: dict, response: dict, script_path: str | Non
     silently misclassifying."""
     if not script_path:
         return {**assertion, "passed": False, "error": "custom assertion: missing scriptPath"}
+    fn_name = assertion.get("function")
+    if not fn_name:
+        return {**assertion, "passed": False,
+                "error": "custom assertion needs `function` key (name in --custom-asserts file)"}
     try:
         mod = _get_custom_module(script_path)
         fn = getattr(mod, fn_name)
@@ -287,7 +292,7 @@ def expand_data_driven(cases: list[dict]) -> list[dict]:
     return expanded
 
 
-def run_one(case: dict, base_url: str, auth, timeout: float, scopes: list[dict], pre_hook, spec: dict, defaults: dict, context: dict | None = None, envelope: dict | None = None) -> dict:
+def run_one(case: dict, base_url: str, auth, timeout: float, scopes: list[dict], pre_hook, spec: dict, defaults: dict, context: dict | None = None, envelope: dict | None = None, custom_asserts: str | None = None, envelope_doc: dict | None = None) -> dict:
     # Default category for hand-written cases that omit it
     cat = case.get("category") or "positive"
     # Merge defaults first, then resolve vars
@@ -295,6 +300,12 @@ def run_one(case: dict, base_url: str, auth, timeout: float, scopes: list[dict],
     # Inject context into scopes (between case-data and env) so {{token}} works
     full_scopes = ([{"values": context}] if context else []) + scopes
     resolved_case = deep_resolve(case_with_defaults, full_scopes)
+
+    # Per-endpoint envelope override: enveloped APIs that return bare TokenPair
+    # from /auth/login need the envelope disabled for that one endpoint, but
+    # enabled for the rest. Look it up by endpointId before we resolve vars
+    # or start the request so a missing override doesn't blow up later.
+    case_envelope = resolve_envelope_for_case(envelope_doc, case.get("endpointId"), envelope)
 
     # Isolated endpoint marker: this case invalidates the auth token (logout,
     # password reset, account delete). Snapshot the current auth state, get
@@ -315,23 +326,37 @@ def run_one(case: dict, base_url: str, auth, timeout: float, scopes: list[dict],
 
     try:
         return _run_one_inner(case, resolved_case, auth_headers, base_url, auth, timeout,
-                              scopes, pre_hook, spec, defaults, context, envelope, cat)
+                              scopes, pre_hook, spec, defaults, context, case_envelope, cat, custom_asserts)
     finally:
         if isolated and auth_snapshot is not None:
             auth.restore(auth_snapshot)
 
 
 def _run_one_inner(case, resolved_case, auth_headers, base_url, auth, timeout, scopes,
-                   pre_hook, spec, defaults, context, envelope, cat):
+                   pre_hook, spec, defaults, context, envelope, cat, script_path=None):
     # Detect unresolved variables and fail gracefully (don't crash)
     unresolved = find_unresolved(resolved_case)
     if unresolved:
         return {"caseId": case["id"], "endpointId": case.get("endpointId", ""), "category": cat,
                 "status": "error", "failureClass": "config_error",
-                "error": f"unresolved variables: {', '.join(unresolved[:3])}"}
+                "error": f"unresolved variables: {', '.join(unresolved[:3])}",
+                "diagnosis": {"category": "config",
+                              "root_cause": f"unresolved variables: {', '.join(unresolved[:3])}",
+                              "suggestion": "set missing vars via `jxtest env set <name> KEY VALUE` "
+                                            "or move them to env/<name>.json",
+                              "related_config": "env/<name>.json:values  +  global.json"}}
     if auth_headers.get("error"):
+        err = auth_headers["error"]
+        # The auth error is multi-line; the first line goes to `error` (machine),
+        # the full message goes to `diagnosis.root_cause` (human).
+        first_line = err.split("\n")[0]
         return {"caseId": case["id"], "endpointId": case.get("endpointId", ""), "category": cat,
-                "status": "error", "failureClass": "config_error", "error": auth_headers["error"]}
+                "status": "error", "failureClass": "config_error", "error": first_line,
+                "diagnosis": {"category": "authentication",
+                              "root_cause": err,
+                              "suggestion": "check auth.url/method/body/tokenPath; "
+                                            "run `jxtest env test <name> --login` to probe live",
+                              "related_config": "test-cases.json:auth  +  env/<name>.json:USER/PASS"}}
 
     # Pre-request hook. Auth is merged in *before* the hook runs and ctx["headers"]
     # is the dict actually sent, so a script can add, override or drop any header.
@@ -343,7 +368,11 @@ def _run_one_inner(case, resolved_case, auth_headers, base_url, auth, timeout, s
         pre_hook(ctx)
     except Exception as e:
         return {"caseId": case["id"], "endpointId": case.get("endpointId", ""), "category": cat,
-                "status": "error", "failureClass": "config_error", "error": f"pre-script: {e}"}
+                "status": "error", "failureClass": "config_error", "error": f"pre-script: {e}",
+                "diagnosis": {"category": "config",
+                              "root_cause": f"pre-script threw: {type(e).__name__}: {e}",
+                              "suggestion": "fix the pre-script (jxtest run --pre-script <file.py>)",
+                              "related_config": "hooks/pre.py"}}
     headers = dict(ctx["headers"])
     sent_headers = dict(headers)  # capture for result reporting (post-pre-hook)
     _ = headers  # keep linter quiet; captured below for result reporting
@@ -367,7 +396,7 @@ def _run_one_inner(case, resolved_case, auth_headers, base_url, auth, timeout, s
             resp = execute(url, resolved_case["method"], headers, resolved_case.get("body"), timeout)
 
     is_network = resp.get("networkError", False)
-    assertion_results = [run_assertion(a, resp, spec, envelope, script_path=args.custom_asserts)
+    assertion_results = [run_assertion(a, resp, spec, envelope, script_path=script_path)
                          for a in resolved_case.get("assertions", [])]
     all_passed = all(a["passed"] for a in assertion_results)
     passed = not is_network and all_passed
@@ -401,12 +430,90 @@ def _run_one_inner(case, resolved_case, auth_headers, base_url, auth, timeout, s
             "outcome": outcome, "businessCode": business_code(resp, envelope),
             "durationMs": resp.get("durationMs"), "failureClass": None if passed else failure,
             "error": resp.get("error"),
+            "diagnosis": _diagnose(resp, envelope, failure, resolved_case) if not passed else None,
             "request": {"method": resolved_case["method"], "url": url,
                         "headers": sent_headers,
                         "body": resolved_case.get("body")},
             "response": None if is_network else {"status": resp.get("status"), "body": resp.get("body")},
             "assertions": assertion_results,
             "extracted": extracted}
+
+
+def _diagnose(resp: dict, envelope: dict | None, failure_class: str | None,
+              resolved_case: dict) -> dict:
+    """Build a structured diagnosis for a failed case.
+
+    The goal: turn 'assertion_failed' (a useless label) into something an AI or
+    human can act on. Each diagnosis has:
+      - category:    authentication | authorization | validation | server | not_found | conflict | contract
+      - root_cause:  short human-readable explanation
+      - suggestion:  the next command or config change to try
+      - related_config:  pointer to the relevant field in test-cases.json / env /
+                         api-spec.json so the user can find it without searching
+    """
+    if failure_class == "network_error":
+        return {"category": "network",
+                "root_cause": f"request failed: {resp.get('error')}",
+                "suggestion": "check base URL (--base-url), or env file's baseUrl value",
+                "related_config": "test-cases.json:baseUrl  or  env/<name>.json:baseUrl"}
+    if failure_class == "config_error":
+        return {"category": "config",
+                "root_cause": resp.get("error") or "missing variable or script error",
+                "suggestion": "check {{var}} resolution — list unresolved vars in auth header / body",
+                "related_config": "test-cases.json:auth.body  or  env/<name>.json"}
+
+    status = resp.get("status") or 0
+    code = business_code(resp, envelope)
+    body = (resp.get("body") or "")[:200]
+    body_low = body.lower()
+
+    if status == 401:
+        return {"category": "authentication",
+                "root_cause": f"HTTP 401: missing/invalid token ({code or 'no envelope code'})",
+                "suggestion": "verify login (jxtest env test <name> --login), check auth.tokenPath, "
+                              "or check token expiry — auth.refresh() runs once automatically",
+                "related_config": "test-cases.json:auth.tokenPath"}
+    if status == 403:
+        return {"category": "authorization",
+                "root_cause": "HTTP 403: token valid but lacks permission for this endpoint",
+                "suggestion": "use a different test user with the right role, or skip the case with "
+                              "meta.skip_if: ['403']",
+                "related_config": "env/<name>.json:USER  or  test-cases.json:meta"}
+    if status == 404:
+        return {"category": "not_found",
+                "root_cause": f"HTTP 404: endpoint or resource not found at {resp.get('url', '')}",
+                "suggestion": "verify the path matches the spec; check if extract from a prior case returned None",
+                "related_config": "test-cases.json:path"}
+    if status == 409:
+        return {"category": "conflict",
+                "root_cause": f"HTTP 409: likely uniqueness violation (code={code})",
+                "suggestion": "use dynamic variables {{$uuid}}/{{$timestamp}} for unique fields "
+                              "instead of fixed strings",
+                "related_config": "test-cases.json:body"}
+    if 400 <= status < 500 and ("required" in body_low or "missing" in body_low or "field" in body_low):
+        return {"category": "validation",
+                "root_cause": f"HTTP {status}: server says a field is missing (body preview: {body[:100]}...)",
+                "suggestion": "field declared required by server but missing from spec. Use "
+                              "jxtest gen --contract to fill in the missing fields",
+                "related_config": "api-spec.json:requestBody.schema  +  contract.json"}
+    if status >= 500 or (code and 500 <= (code if isinstance(code, int) else 0) < 600):
+        return {"category": "server",
+                "root_cause": f"server_error: HTTP {status} or envelope code={code}",
+                "suggestion": "5xx from server — likely a real defect, not a config issue. "
+                              "Check the API logs for the request body sent",
+                "related_config": "(no config — server-side issue)"}
+    if failure_class == "assertion_failed":
+        # Business assertion failure: HTTP was OK but business outcome didn't match
+        # what the case expected.
+        return {"category": "assertion",
+                "root_cause": f"business outcome didn't match expectation (HTTP {status}, code={code})",
+                "suggestion": "inspect the response body, check envelope config "
+                              "(is the API enveloped?), check whether failure was expected",
+                "related_config": "test-cases.json:envelope  +  test-cases.json:cases[i].assertions"}
+    return {"category": "unknown",
+            "root_cause": "no diagnosis available",
+            "suggestion": "rerun with --junit and check stacktrace",
+            "related_config": "test-results.json"}
 
 
 def write_junit(results: list[dict], path: str, duration_ms: int) -> None:
@@ -548,7 +655,8 @@ def main() -> None:
     def run_sequential(case):
         nonlocal context
         result = run_one(case, base_url, auth, args.timeout, scopes,
-                         pre_hook, spec, defaults, context=context, envelope=envelope)
+                         pre_hook, spec, defaults, context=context, envelope=envelope,
+                         custom_asserts=args.custom_asserts, envelope_doc=data)
         # Only update context if extraction succeeded (not None)
         if result.get("extracted"):
             for k, v in result["extracted"].items():
@@ -563,7 +671,8 @@ def main() -> None:
         else:
             with ThreadPoolExecutor(max_workers=min(parallel, len(phase))) as ex:
                 futures = {ex.submit(run_one, c, base_url, auth, args.timeout, scopes,
-                                     pre_hook, spec, defaults, None, envelope): c
+                                     pre_hook, spec, defaults, None, envelope,
+                                     args.custom_asserts, data): c
                            for c in phase}
                 phase_results: list[dict] = []
                 for fut in as_completed(futures):

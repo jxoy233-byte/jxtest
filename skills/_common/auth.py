@@ -45,25 +45,62 @@ def fetch_oauth2_token(auth: dict, scopes: list[dict]) -> str:
 
 
 def fetch_login_token(auth: dict, base_url: str) -> tuple[str, str]:
-    """POST credentials to a JSON login endpoint. Returns (token, error)."""
+    """POST credentials to a JSON login endpoint. Returns (token, error).
+
+    The error string is multi-line and structured to help the user act:
+    it includes the actual response body, a likely cause, and a suggested
+    fix. A flat "not found" string is a dead-end: the user has to read
+    source to figure out what went wrong.
+    """
     url = auth["url"]
     if not url.startswith("http"):
         if not base_url:
-            return "", "login auth needs a base URL (--base-url or spec baseUrl)"
+            return "", ("login auth needs a base URL — pass --base-url or "
+                        "set baseUrl in test-cases.json")
         url = build_url(base_url, url)
     resp = execute(url, auth.get("method", "POST"), {"Content-Type": "application/json"},
                    auth.get("body"), auth.get("timeout", 10.0))
     if resp.get("networkError"):
-        return "", f"login request failed: {resp.get('error')}"
+        return "", (f"login request failed: {resp.get('error')}\n"
+                    f"  - URL: {url}\n"
+                    f"  - Check: is the base URL reachable? (curl {base_url or url})")
     if not (200 <= (resp.get("status") or 0) < 300):
-        return "", f"login returned HTTP {resp.get('status')}: {(resp.get('body') or '')[:200]}"
+        body = (resp.get("body") or "")[:300]
+        return "", (f"login returned HTTP {resp.get('status')} (expected 200):\n"
+                    f"  - Body: {body}\n"
+                    f"  - Check: are auth.body username/password correct?\n"
+                    f"  - Run with --envelope-probe '' to skip envelope detection")
     try:
         data = json.loads(resp.get("body") or "{}")
     except json.JSONDecodeError:
-        return "", "login response is not JSON"
-    token = get_json_path(data, auth.get("tokenPath", "access_token"))
+        return "", ("login response is not JSON — check the auth.url points "
+                    "to a JSON endpoint, not a redirect to HTML login page")
+    token_path = auth.get("tokenPath", "access_token")
+    token = get_json_path(data, token_path)
     if not token:
-        return "", f"tokenPath '{auth.get('tokenPath', 'access_token')}' not found in login response"
+        body_preview = json.dumps(data)[:400]
+        # Heuristics to point at the right cause
+        suggestion = ""
+        # If user has `data.X` but the response has no `data` envelope → strip `data.`
+        if token_path.startswith("data.") and "data" not in data:
+            bare = token_path[len("data."):]
+            if bare in data:
+                suggestion = (f"\n\nLikely cause: response is NOT enveloped but tokenPath has 'data.' prefix.\n"
+                              f"  Fix: change tokenPath from '{token_path}' to '{bare}'")
+            else:
+                suggestion = (f"\n\nLikely cause: response has no 'data' envelope.\n"
+                              f"  Fix: look at actual response keys below and pick the right path.")
+        elif "code" in data and "msg" in data and token_path in ("access_token", "token"):
+            # Looks enveloped but the user is reaching for a top-level token — token is inside `data`
+            suggestion = (f"\n\nLikely cause: response IS enveloped ({{code, msg, data}}).\n"
+                          f"  Fix: change tokenPath to 'data.{token_path}'")
+        return "", (f"Auth configuration error: tokenPath '{token_path}' not found in login response\n"
+                    f"\n  Response body:\n    {body_preview}\n{suggestion}\n"
+                    f"\n  Examples of common fixes:\n"
+                    f"    'access_token'        — bare token in root\n"
+                    f"    'data.access_token'   — enveloped API (code/msg/data)\n"
+                    f"    'token.access_token'  — nested token object\n"
+                    f"\n  Inspect live: jxtest env test <name> --login")
     return str(token), ""
 
 

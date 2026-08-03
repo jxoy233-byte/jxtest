@@ -26,6 +26,31 @@ def load_envelope(doc: dict | None) -> dict | None:
     return env if isinstance(env, dict) and env.get("codePath") else None
 
 
+def resolve_envelope_for_case(doc: dict | None, endpoint_id: str | None,
+                              fallback: dict | None) -> dict | None:
+    """Apply per-endpoint envelope override on top of the global envelope.
+
+    A spec / test-cases.json may carry:
+        "envelope":                {"codePath": "code", "successValues": [0]},
+        "envelopeOverrides": {
+            "POST_/api/v1/auth/login":     null,         # no envelope
+            "GET_/api/v1/health":           null,
+            "POST_/api/v1/users":           {"codePath": "code", "successValues": [0, 201]},
+        }
+
+    Returns the per-case envelope (or None for "force no envelope"), falling back
+    to the global envelope when no override exists. Hybrid APIs that mix
+    enveloped and bare endpoints can now be tested with a single config.
+    """
+    if not isinstance(doc, dict):
+        return fallback
+    overrides = doc.get("envelopeOverrides")
+    if endpoint_id and isinstance(overrides, dict) and endpoint_id in overrides:
+        # None means "explicit disable"; an object means "use this instead"
+        return overrides[endpoint_id]
+    return fallback
+
+
 def parse_envelope_arg(arg: str) -> dict:
     """Parse a CLI `--envelope 'code:0'` / `'data.code:0,200'` / `'code:0,200:msg'` argument.
 

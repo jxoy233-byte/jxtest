@@ -25,6 +25,7 @@ CMDS = {
     "completion": ("api-test-completion", "completion.py"),
     "scenario": ("api-test-scenario", "scenario.py"),
     "factory": ("api-test-factory", "factory.py"),
+    "suite":    ("api-test-suite",  "suite.py"),
 }
 
 HELP = """jxtest — AI-native API testing toolkit
@@ -48,6 +49,7 @@ Commands:
   doc       Generate Markdown API docs
   scenario  Generate end-to-end business scenario test cases (login → action → verify)
   factory   Generate per-test unique data + auto-cleanup after the run
+  suite     Manage named test suites (save filter presets, run by name)
   completion Generate shell completion (bash|zsh|fish)
 
 Examples:

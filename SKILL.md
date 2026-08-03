@@ -395,6 +395,125 @@ jxtest security api-spec.json --base-url $API_URL --rules examples/security-rule
 9. **`make` is optional** — only Unix. On Windows, skip Makefile targets and invoke scripts directly.
 10. **Enveloped APIs need explicit configuration** — `business_ok` / `business_not_ok` silently degrade to HTTP status checks if `envelope` isn't set. If the user mentions "always returns 200", "code in body", "business status", "wrapped response", or similar, run `jxtest schema` with `--envelope` before generating.
 
+## Troubleshooting — common errors and fixes
+
+Real problems seen while testing real APIs. Each entry: error → cause → fix.
+
+### `tokenPath 'data.access_token' not found in login response`
+
+**Cause**: The login response is NOT enveloped (returns `{access_token, refresh_token}` directly) but the auth block has `tokenPath: "data.access_token"`. The auth error message now prints the actual response body and proposes the right fix.
+
+**Fix**: strip `data.` from `tokenPath`.
+
+```json
+{"auth": {"type": "login", "tokenPath": "access_token", ...}}
+```
+
+### "API looks enveloped — probe response had {{code, msg}} shape ... Re-run with --envelope"
+
+**Cause**: API wraps responses in `{code, msg, data}` but `--envelope` isn't set. Without it, `business_ok` accepts `code: 500` as passing.
+
+**Fix**: tell jxtest about the envelope, either:
+
+```bash
+jxtest schema openapi.yaml --envelope 'code:0'   # one-time, persists in api-spec.json
+jxtest run test-cases.json --envelope 'code:0'  # per-run override
+jxtest run test-cases.json --envelope-suggested 'code:0'  # trust auto-detection
+```
+
+### Hybrid APIs (some endpoints enveloped, some bare)
+
+**Cause**: Login/refresh endpoints return bare `{access_token, refresh_token}`; everything else returns `{code, msg, data}`. A single envelope config breaks one or the other.
+
+**Fix**: per-endpoint overrides in `test-cases.json`:
+
+```json
+{
+  "envelope": {"codePath": "code", "successValues": [0]},
+  "envelopeOverrides": {
+    "POST_/api/v1/auth/login": null,
+    "POST_/api/v1/auth/refresh": null,
+    "GET_/health": null
+  },
+  "cases": [...]
+}
+```
+
+### `missing field 'org_code'` (and other business fields not in OpenAPI)
+
+**Cause**: OpenAPI schemas only describe what the spec author captured. Many real APIs have implicit required fields (multi-tenant `org_code`, `tenant_id`, default `locale`, etc.) that the schema doesn't list.
+
+**Fix — three options**:
+
+1. **Contract workflow** (recommended for AI-driven pipelines):
+   ```bash
+   jxtest gen api-spec.json --contract-gap -o gap.json
+   # AI reads gap.json, writes contract.json with field contracts
+   jxtest gen api-spec.json --contract contract.json
+   ```
+
+2. **Add field hints directly to auth block** (one-shot):
+   ```json
+   {"auth": {"body": {"username": "{{USER}}", "password": "{{PASS}}", "org_code": "{{ORG_CODE}}"}}}
+   ```
+
+3. **Env var injection**: same body as above, then `jxtest env set local ORG_CODE DEMO`.
+
+### `Error: base URL not set` / `Connection refused`
+
+**Cause**: `--base-url` not passed and `baseUrl` not in `test-cases.json`.
+
+**Fix**:
+
+```bash
+jxtest env create local --base-url https://api.dev.com
+jxtest env set local USER admin
+jxtest run test-cases.json --env local --base-url https://api.dev.com
+```
+
+Or for one-off: `jxtest run test-cases.json --base-url https://api.dev.com`.
+
+### `unresolved variables: TOKEN, USER` etc.
+
+**Cause**: `{{TOKEN}}` etc. in `test-cases.json` but the env file doesn't define them.
+
+**Fix**: `jxtest env set <name> TOKEN <value>`, or pre-flight check:
+
+```bash
+jxtest env validate --spec api-spec.json   # lists what's missing
+```
+
+### `business_not_ok` passes but should fail (or vice versa)
+
+**Cause**: For HTTP 200 responses that wrap failures in `{code: 500}`, you need an envelope configured. Without one, the runner sees only HTTP 200 and the test would mark as passed regardless.
+
+**Fix**: see "API looks enveloped" above.
+
+### Test data collides between runs ("username already exists")
+
+**Cause**: Generated tests use fixed strings (`alice_smith`, `test@example.com`).
+
+**Fix**: use dynamic variables instead of fixed strings:
+
+```json
+{"body": {"username": "user-{{$uuid}}", "email": "{{$uuid}}@example.com"}}
+```
+
+Built-in dynamic vars: `{{$timestamp}}`, `{{$iso}}`, `{{$uuid}}`, `{{$randomInt}}`.
+
+### Probing env config before running
+
+```bash
+jxtest env test local --cases test-cases.json
+  Checking local → https://api.dev.com
+  ✓ baseUrl reachable (HTTP 200)
+  → login probe: POST /auth/login
+  ✓ login OK (token=eyJhbGci...)
+  → run tests:  jxtest run test-cases.json --env local --base-url ...
+```
+
+Catches wrong URL, expired credentials, and login response format mismatches BEFORE running the full suite.
+
 ## When NOT to use jxtest
 
 - Need **1000+ concurrent VUs** — Python GIL caps at ~200 VUs. Use k6/Gatling.

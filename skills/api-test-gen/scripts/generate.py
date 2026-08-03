@@ -357,28 +357,34 @@ def _schema_example(schema: dict) -> Any:
 
 
 def _example_for(t: str, fmt: str | None = None, name: str = "") -> Any:
-    """Generate realistic test values per type/format/field-name. Faker-style, stdlib-only."""
+    """Generate realistic test values per type/format/field-name. Faker-style, stdlib-only.
+
+    Fields likely to require uniqueness (email, username, sku, phone, code) get a
+    {{$uuid}} suffix so re-runs don't collide on uniqueness constraints. Static
+    values still appear in test-cases.json for human-readability; the runner
+    resolves the dynamic var to a fresh value per substitution.
+    """
     # Format-driven values
     if fmt == "email":
-        return "alice.smith@example.com"
+        return "alice.smith+{{$uuid}}@example.com"
     if fmt == "uuid":
-        return "550e8400-e29b-41d4-a716-446655440000"
+        return "{{$uuid}}"
     if fmt == "uri" or fmt == "url":
-        return "https://example.com/resource/123"
+        return "https://example.com/resource/{{$uuid}}"
     if fmt == "date-time":
-        return "2026-01-15T10:30:00Z"
+        return "{{$iso}}"
     if fmt == "date":
         return "2026-01-15"
     # Name-aware realistic values (heuristic by field name)
     name_l = name.lower()
     if "email" in name_l:
-        return "alice.smith@example.com"
+        return "alice.smith+{{$uuid}}@example.com"
     if any(k in name_l for k in ("name", "first", "given")):
         return "Alice Smith"
     if "last" in name_l or "surname" in name_l or "family" in name_l:
         return "Johnson"
     if "phone" in name_l or "mobile" in name_l:
-        return "+1-555-0123"
+        return "+1-555-0123-{{$randomInt}}"
     if "city" in name_l:
         return "San Francisco"
     if "country" in name_l:
@@ -392,7 +398,7 @@ def _example_for(t: str, fmt: str | None = None, name: str = "") -> Any:
     if "description" in name_l or "body" in name_l or "content" in name_l or "message" in name_l:
         return "This is a realistic test message with enough content."
     if "url" in name_l or "link" in name_l or "website" in name_l:
-        return "https://example.com/page"
+        return "https://example.com/page/{{$uuid}}"
     if "color" in name_l:
         return "blue"
     if "status" in name_l:
@@ -402,13 +408,15 @@ def _example_for(t: str, fmt: str | None = None, name: str = "") -> Any:
     if "tag" in name_l:
         return "production"
     if "username" in name_l or "user" in name_l:
-        return "alice_smith"
+        return "alice_smith_{{$uuid}}"
     if "password" in name_l or "secret" in name_l or "token" in name_l:
         return "P@ssw0rd!2026"
     if "api_key" in name_l or "apikey" in name_l:
-        return "sk-test-abc123def456"
+        return "sk-test-{{$uuid}}"
+    if "sku" in name_l or "code" in name_l:
+        return "SKU-{{$uuid}}"
     # Type-driven defaults
-    return {"string": "realistic-value", "integer": 42, "number": 3.14, "boolean": True}.get(t, "realistic-value")
+    return {"string": "value-{{$uuid}}", "integer": 42, "number": 3.14, "boolean": True}.get(t, "value-{{$uuid}}")
 
 
 def auto_auth(spec: dict) -> dict | None:
@@ -550,6 +558,36 @@ def main() -> None:
             print(f"      {ep}", file=sys.stderr)
         if len(schema_less) > 5:
             print(f"      ... and {len(schema_less) - 5} more", file=sys.stderr)
+
+    # --- Progressive next-steps. After gen, the user often doesn't know how to
+    # proceed. Print a small checklist of the next commands so they aren't left
+    # staring at a generated file wondering what to do next. ---
+    print("", file=sys.stderr)
+    auth = out["auth"]
+    has_auth = isinstance(auth, dict) and auth.get("type") in ("bearer", "login", "oauth2")
+    has_login = isinstance(auth, dict) and auth.get("type") == "login"
+    print("Next steps:", file=sys.stderr)
+    if out["baseUrl"]:
+        print(f"  ✓ baseUrl already set: {out['baseUrl']}", file=sys.stderr)
+    else:
+        print("  → set baseUrl:  jxtest env create <name> --base-url <URL>", file=sys.stderr)
+        print("                   jxtest env set <name> USER admin", file=sys.stderr)
+    if has_auth and has_login:
+        print(f"  → verify login:  jxtest env test <name> --login", file=sys.stderr)
+    elif has_auth:
+        print("  → set auth token/user:  jxtest env set <name> USER <username>", file=sys.stderr)
+        print("                         jxtest env set <name> TOKEN <token>", file=sys.stderr)
+    print(f"  → run tests:     jxtest run {args.output} --env <name> --base-url <URL>", file=sys.stderr)
+    if schema_less:
+        print(f"  → fill gaps:     jxtest gen api-spec.json --contract-gap -o contract-gap.json", file=sys.stderr)
+        print("                   (AI reads gap, writes contract.json, then re-run with --contract)", file=sys.stderr)
+    if not envelope:
+        # Many APIs wrap responses; without an envelope config, business_ok
+        # silently degrades to a plain HTTP-status check and missed wrapped
+        # failures become silent passes.
+        print("", file=sys.stderr)
+        print("  Tip: if your API wraps responses (HTTP 200 + body.code), re-run with --envelope 'code:0'", file=sys.stderr)
+        print("       Auto-detect: jxtest run --envelope-suggested 'code:0'", file=sys.stderr)
 
 
 
