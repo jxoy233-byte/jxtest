@@ -15,6 +15,14 @@ PLACEHOLDER_RE = re.compile(r"^(?:REPLACE_ME|TODO|CHANGE_ME|<[^>]+>|string|examp
 AUTH_HINT_RE = re.compile(r"(?:auth|login|sign[-_ ]?in|token|oauth)", re.IGNORECASE)
 CRUD_RE = re.compile(r"(?:create|add|new|update|edit|patch|delete|remove|get|detail|list|search)", re.IGNORECASE)
 
+# Headers the auth block writes — case-insensitive. The auth block already
+# injects one of these on every request, so any case-level header that
+# case-insensitively matches will create a duplicate and confuse the server.
+# Default set covers the standard auth providers (bearer/login/oauth2/basic
+# all use Authorization; api_key uses X-API-Key; X-Auth-Token is a common
+# custom alternative).
+_DEFAULT_AUTH_HEADERS = {"authorization", "x-api-key", "x-auth-token"}
+
 
 def issue(code: str, severity: str, message: str, evidence=None, actions=None) -> dict:
     return {
@@ -176,6 +184,21 @@ def inspect_cases(spec: dict, cases: dict, env_name: str | None) -> tuple[dict, 
         issues.append(issue("cases_missing", "error", "test-cases.json has no cases array", {"path": "cases"}))
         return {"total": 0, "coveredEndpoints": 0, "missingEndpoints": []}, issues, suggestions
 
+    # Resolve which header names the auth block writes. cases.auth wins over
+    # spec.auth (mirrors how the runner resolves it). When neither is present,
+    # use the standard set so we still catch `Authorization` duplicates even in
+    # bearer-less setups.
+    auth_block = cases.get("auth") if isinstance(cases.get("auth"), dict) else spec.get("auth")
+    auth_headers: set[str] = set(_DEFAULT_AUTH_HEADERS)
+    if isinstance(auth_block, dict):
+        h = auth_block.get("header")
+        if isinstance(h, str) and h.strip():
+            auth_headers.add(h.strip().lower())
+        # api_key type may emit a non-Authorization header (X-API-Key etc.) even
+        # when `header` is not set; mirror that.
+        if auth_block.get("type") == "api_key":
+            auth_headers.add("x-api-key")
+
     endpoints = endpoint_by_id(spec)
     refs_by_var = variable_locations(cases)
     producers: dict[str, str] = {}
@@ -218,6 +241,43 @@ def inspect_cases(spec: dict, cases: dict, env_name: str | None) -> tuple[dict, 
         for var in find_vars(case):
             if var in producers and producers[var] != case_id:
                 dependency_graph[case_id].add(producers[var])
+
+    # Duplicate-auth-header scan. The auth block injects e.g. `Authorization:
+    # Bearer <token>` on every request. If a case's headers also include a key
+    # that matches (case-insensitive), HTTP servers see both — the second one
+    # usually wins and breaks the request. The runner can also be configured so
+    # the case value "wins" (auth_required cases do this on purpose), so we only
+    # flag *non-empty, non-override* values here. False positives are easy to
+    # dismiss; the false negative was the original experience-report trap.
+    auth_dupes: list[dict] = []
+    for case in case_list:
+        if not isinstance(case, dict) or not case.get("id"):
+            continue
+        headers = case.get("headers") or {}
+        if not isinstance(headers, dict):
+            continue
+        for key, val in headers.items():
+            if not isinstance(key, str):
+                continue
+            if key.lower() not in auth_headers:
+                continue
+            if val is None or val == "":
+                # Empty value is the *intent* of auth_required — skip it.
+                continue
+            auth_dupes.append({"caseId": case["id"], "header": key, "value": val})
+    if auth_dupes:
+        issues.append(issue(
+            "duplicate_auth_header", "warning",
+            f"{len(auth_dupes)} case(s) send a header that conflicts with the auth block",
+            {"conflicts": auth_dupes[:20], "total": len(auth_dupes),
+             "authHeaderSet": sorted(auth_headers)},
+            [action("jxtest gen api-spec.json -o test-cases.json",
+                    "regenerate cases — the sanitizer strips auth headers from auto-generated cases",
+                    True),
+             action("jxtest heal test-results.json --cases test-cases.json",
+                    "heuristic pass can strip the duplicate headers if you prefer to keep current cases",
+                    True)]
+        ))
 
     if extract_issues:
         issues.append(issue("extract_path_suspect", "warning", "some extract paths are empty or absent from the declared response schema", {"items": extract_issues[:20]}, [action("jxtest validate test-cases.json --spec api-spec.json", "validate case structure before running")]))

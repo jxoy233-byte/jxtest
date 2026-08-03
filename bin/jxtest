@@ -74,7 +74,7 @@ def main() -> None:
         print(HELP)
         sys.exit(0)
     if sys.argv[1] in ("-V", "--version"):
-        print("jxtest 1.2")
+        print("jxtest 1.3")
         sys.exit(0)
 
     cmd = sys.argv[1]

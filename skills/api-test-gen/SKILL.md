@@ -143,6 +143,19 @@ Only `required: true` fields are sent in the generated body (keeps it close to "
 
 If the spec declares security but no top-level `auth`, `gen` adds a `bearer` stub with `{{TOKEN}}` so `run` can pick up `TOKEN` from env. If the spec already has an `auth` block (e.g. `login`), `gen` passes it through unchanged.
 
+## Auth-header sanitation
+
+When the spec declares a parameter `{name: "authorization", in: "header"}` (or `X-API-Key`, `X-Auth-Token`), `gen` would otherwise duplicate the auth block's header on every generated request. The auth block already writes one of these; a case-level value with the same name confuses the server (HTTP `Authorization` becomes two headers, and servers pick unpredictably).
+
+`gen` strips these per-case. Concretely:
+
+- `spec.auth.header` (when set) is always skipped.
+- The fixed set `{Authorization, X-API-Key, X-Auth-Token}` (case-insensitive) is skipped when no auth header is configured.
+- The `auth_required` security case still writes an empty value for that header — that one is **not** stripped (its purpose is to test rejection without auth).
+- A stderr summary lists what was stripped per run.
+
+The intended escape hatch is `test-cases.json:auth` — never `env.json:headers` (env doesn't define per-request headers; `env set` will now warn).
+
 ## Rules
 
 - **No fabricated URLs**: path comes from spec, never invented.

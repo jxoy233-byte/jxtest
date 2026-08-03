@@ -92,11 +92,35 @@ def compute_coverage(spec: dict, results: dict) -> dict:
     # Business-level outcomes (only meaningful when the run had an envelope configured)
     outcomes = Counter(r.get("outcome") for r in results.get("results", []) if r.get("outcome"))
 
+    # Endpoints "called" but every result was an authentication failure. These
+    # are not real coverage — the server rejected the request before the handler
+    # ran, so 0% of the actual response surface was exercised. The user almost
+    # always wants to see this bucket alongside `untested_endpoints` because the
+    # two together sum to "endpoints whose behaviour was not observed at all".
+    by_ep_results: dict[str, list[dict]] = {}
+    for r in results.get("results", []):
+        by_ep_results.setdefault(r["endpointId"], []).append(r)
+    not_called_due_to_auth: list[dict] = []
+    for ep_id, ep_results in by_ep_results.items():
+        if not ep_results:
+            continue
+        if all(r.get("failureClass") == "authentication" for r in ep_results):
+            ep = spec_endpoints.get(ep_id, {})
+            not_called_due_to_auth.append({
+                "id": ep_id,
+                "method": ep.get("method"),
+                "path": ep.get("path"),
+                "attempts": len(ep_results),
+            })
+
     # Calculate overall coverage %
     total_endpoints = len(spec_endpoints)
     covered_endpoints = total_endpoints - len(untested)
     coverage_pct = round(covered_endpoints / total_endpoints * 100, 1) if total_endpoints else 0
     code_pct = round(observed_total / declared_total * 100, 1) if declared_total else 0
+    auth_blocked = len(not_called_due_to_auth)
+    effective_untested = len(untested) + auth_blocked
+    effective_pct = round((total_endpoints - effective_untested) / total_endpoints * 100, 1) if total_endpoints else 0
 
     return {
         "version": "1.0",
@@ -104,7 +128,10 @@ def compute_coverage(spec: dict, results: dict) -> dict:
             "total_endpoints": total_endpoints,
             "covered_endpoints": covered_endpoints,
             "untested_endpoints": len(untested),
+            "auth_blocked_endpoints": auth_blocked,
+            "effective_untested_endpoints": effective_untested,
             "endpoint_coverage_pct": coverage_pct,
+            "effective_coverage_pct": effective_pct,
             "declared_response_codes": declared_total,
             "observed_response_codes": observed_total,
             "response_code_coverage_pct": code_pct,
@@ -125,6 +152,7 @@ def compute_coverage(spec: dict, results: dict) -> dict:
         "untested_endpoints": [{"id": ep_id, "method": spec_endpoints[ep_id]["method"],
                                 "path": spec_endpoints[ep_id]["path"]}
                                for ep_id in untested],
+        "not_called_due_to_auth": not_called_due_to_auth,
         "per_endpoint": per_endpoint_out,
         "failures_by_endpoint": failures_by_ep,
     }
@@ -150,6 +178,21 @@ def render_markdown(cov: dict) -> str:
         lines.append(f"## ❌ Untested Endpoints ({len(cov['untested_endpoints'])})")
         for ep in cov["untested_endpoints"]:
             lines.append(f"- `{ep['method']} {ep['path']}` (id: `{ep['id']}`)")
+        lines.append("")
+
+    if cov.get("not_called_due_to_auth"):
+        lines.append(f"## 🔒 Endpoints blocked by auth failures ({len(cov['not_called_due_to_auth'])})")
+        lines.append("These endpoints returned auth errors on every attempt — coverage is misleading")
+        lines.append("until the auth header is fixed. See `jxtest doctor` or `jxtest heal`.")
+        lines.append("")
+        lines.append("| Endpoint | Attempts |")
+        lines.append("|----------|----------|")
+        for ep in cov["not_called_due_to_auth"]:
+            lines.append(f"| `{ep['method']} {ep['path']}` (id: `{ep['id']}`) | {ep['attempts']} |")
+        lines.append("")
+        lines.append(f"**Effective coverage** (excluding auth-blocked): "
+                     f"{cov['summary']['effective_coverage_pct']}% "
+                     f"({cov['summary']['total_endpoints'] - cov['summary']['effective_untested_endpoints']}/{cov['summary']['total_endpoints']} endpoints)")
         lines.append("")
 
     missing_methods = cov["method_coverage"]["missing"]
@@ -220,6 +263,13 @@ def main() -> None:
         print(f"Coverage: {s['endpoint_coverage_pct']}% ({s['covered_endpoints']}/{s['total_endpoints']} endpoints)", file=sys.stderr)
         print(f"  response codes: {s['response_code_coverage_pct']}% ({s['observed_response_codes']}/{s['declared_response_codes']})", file=sys.stderr)
         print(f"  {len(cov['untested_endpoints'])} untested, {s['failed']} failures", file=sys.stderr)
+        if s.get("auth_blocked_endpoints"):
+            print(f"  {s['auth_blocked_endpoints']} auth-blocked (every attempt returned 401/403)",
+                  file=sys.stderr)
+            print(f"  effective coverage (excluding auth-blocked): "
+                  f"{s['effective_coverage_pct']}% "
+                  f"({s['total_endpoints'] - s['effective_untested_endpoints']}/{s['total_endpoints']} endpoints)",
+                  file=sys.stderr)
         if s["server_errors"]:
             print(f"  {s['server_errors']} server errors", file=sys.stderr)
 

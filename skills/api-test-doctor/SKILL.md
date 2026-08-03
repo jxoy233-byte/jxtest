@@ -1,6 +1,6 @@
 ---
 name: api-test-doctor
-description: Preflight `api-spec.json` + `test-cases.json` + `env/<name>.json` for an AI-friendly, machine-readable report (variables, extract JSONPath, envelope, auth, dependencies, gaps, next actions). Use this as the first call whenever a CLI flag or runner error hints at missing vars, wrong envelope, or unknown extract paths.
+description: Preflight `api-spec.json` + `test-cases.json` + `env/<name>.json` for an AI-friendly, machine-readable report (variables, extract JSONPath, envelope, auth, dependencies, gaps, **duplicate-auth-header detection**, next actions). Use this as the first call whenever a CLI flag or runner error hints at missing vars, wrong envelope, unknown extract paths, or authentication failures.
 ---
 
 # api-test-doctor
@@ -99,6 +99,7 @@ plus the first 8 `suggestions`.
 | `auth_not_configured` | warning | spec has secured endpoints but no auth block |
 | `envelope_not_configured` | warning | response schemas look enveloped but no envelope is recorded |
 | `mixed_envelope` | warning | some endpoints look enveloped, others bare — set `envelopeOverrides` |
+| `duplicate_auth_header` | warning | one or more cases have a header key (case-insensitive) that matches the auth block's `Authorization`/`X-API-Key`/`X-Auth-Token`. HTTP servers see both headers and pick one unpredictably — the auth token rarely wins. Run `jxtest gen` to regenerate, or `jxtest heal` to strip the duplicates. |
 | `coverage_gap` | suggestion | spec endpoint has no generated case |
 
 ## Steps

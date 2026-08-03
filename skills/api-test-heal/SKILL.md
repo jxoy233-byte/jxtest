@@ -26,6 +26,12 @@ Heuristic-based failure analysis. The script applies **safe auto-fixes** (e.g. l
 
 ## How it works
 
+### Step 0: pre-pass — strip duplicate auth headers (script)
+
+Before heuristic analysis, `heal` scans `test-cases.json` for cases whose headers contain a key (case-insensitive) that conflicts with the auth block (`Authorization`, `X-API-Key`, `X-Auth-Token`, or whatever `spec.auth.header` says). Each non-empty, non-override match is dropped, the modifications are listed under `headerRemovals` in `test-heal-report.json`, and the file is rewritten (with a `.bak` backup, unless `--no-backup`). The auth-required case (empty header value) is preserved on purpose.
+
+This catches the common "OpenAPI declared `parameters[].name=authorization`" spec smell that otherwise scatters `authentication`-classified failures across every positive case. Re-run after the report to see the failures that survive the cleanup.
+
 ### Step 1: heuristic first pass (script)
 
 The script analyzes failures and groups them. For each pattern, it knows a safe fix:

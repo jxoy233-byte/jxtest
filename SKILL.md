@@ -397,6 +397,7 @@ jxtest security api-spec.json --base-url $API_URL --rules examples/security-rule
 8. **No virtualenv needed** — jxtest is a CLI tool, not a library. `pip install pyyaml` is the only install step.
 9. **`make` is optional** — only Unix. On Windows, skip Makefile targets and invoke scripts directly.
 10. **Enveloped APIs need explicit configuration** — `business_ok` / `business_not_ok` silently degrade to HTTP status checks if `envelope` isn't set. If the user mentions "always returns 200", "code in body", "business status", "wrapped response", or similar, run `jxtest schema` with `--envelope` before generating.
+11. **Auth belongs in `test-cases.json:auth`, not env vars.** `env set` warns when a key looks like an HTTP header or starts with `Bearer `. For dynamic auth, use the login flow (`auth.type=login`); `gen` strips duplicate auth headers automatically; `doctor` flags them and `heal` removes them.
 
 ## Troubleshooting — common errors and fixes
 

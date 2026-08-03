@@ -47,6 +47,33 @@ def mask_value(key: str, value) -> str:
     return str(value)
 
 
+# Header-shaped keys (case-insensitive). When the user `env set`s such a key,
+# they're usually trying to inject an HTTP header — env doesn't define per-
+# request headers, so the right home is `test-cases.json:auth` (login flow) or
+# a pre-script. Surface this in cmd_set so the user doesn't end up silently
+# dropping their auth config.
+_HEADER_KEY_HINT = re.compile(r"^(authorization|x-api-key|x-auth-token|cookie)$", re.IGNORECASE)
+
+
+def _warn_if_header_shaped(key: str, value) -> None:
+    """If the key looks like an HTTP header name, nudge the user toward the
+    auth block. Silent = wrong: the previous experience-report workaround had
+    users editing env.json:headers (which isn't read) and then debugging 401s
+    for an hour.
+    """
+    if _HEADER_KEY_HINT.match(key):
+        print("  [!] this key looks like an HTTP header — env doesn't define "
+              "per-request headers.", file=sys.stderr)
+        print("      For dynamic auth, use test-cases.json:auth (login flow); "
+              "see SKILL.md Pattern 9.", file=sys.stderr)
+    elif isinstance(value, str) and value.lstrip().lower().startswith("bearer "):
+        # Treat "Bearer <token>" as a stand-in for an Authorization header.
+        print("  [!] value starts with 'Bearer ' — usually meant to be sent as "
+              "the Authorization header, which env can't do.", file=sys.stderr)
+        print("      Use test-cases.json:auth (type=bearer or login) instead.",
+              file=sys.stderr)
+
+
 def _extract_vars(serialized: str) -> set[str]:
     """Pull every {{var}} token out of a serialized JSON-ish blob."""
     return {match.group(1).strip() for match in VAR_RE.finditer(serialized or "")}
@@ -104,6 +131,7 @@ def cmd_set(args: argparse.Namespace) -> None:
     data.setdefault("values", {})[args.key] = args.value
     save_env(args.name, data)
     print(f"OK  {args.name}.{args.key} = {mask_value(args.key, args.value)}")
+    _warn_if_header_shaped(args.key, args.value)
 
 
 def cmd_resolve(args: argparse.Namespace) -> None:
@@ -240,8 +268,14 @@ def cmd_validate(args: argparse.Namespace) -> None:
             elif isinstance(value, str) and (value.strip() in PLACEHOLDER_PATTERNS or
                                              value.strip().startswith("{{")):
                 placeholders.append(var)
+        # Surface header-shaped keys (Authorization, Cookie, etc.) — env
+        # doesn't apply them to requests, so silently passing validation
+        # creates the "401 mystery" that the experience report hits.
+        env_values_dict = env_data.get("values") if isinstance(env_data.get("values"), dict) else {}
+        header_keys = sorted([k for k in env_values_dict if _HEADER_KEY_HINT.match(k)])
         results.append({"env": env_path.stem, "missing": missing, "placeholders": placeholders,
-                        "dynamic": dynamic, "ok": not missing and not placeholders,
+                        "dynamic": dynamic, "ok": not missing and not placeholders and not header_keys,
+                        "headerKeys": header_keys,
                         "specRefs": len(refs), "casesRefs": len(cases_refs)})
 
     report = {
@@ -261,7 +295,11 @@ def cmd_validate(args: argparse.Namespace) -> None:
             print(f"  vars referenced in {args.cases}: {len(cases_refs)}")
         for r in results:
             status = "ok" if r["ok"] else "issues"
-            print(f"  {r['env']}: {status}  missing={r['missing']}  placeholders={r['placeholders']}")
+            extras = []
+            if r.get("headerKeys"):
+                extras.append(f"headerKeys={r['headerKeys']} (env can't apply these — use test-cases.json:auth)")
+            print(f"  {r['env']}: {status}  missing={r['missing']}  "
+                  f"placeholders={r['placeholders']}  {('  '.join(extras)) if extras else ''}")
 
     if not report["ok"]:
         sys.exit(1)

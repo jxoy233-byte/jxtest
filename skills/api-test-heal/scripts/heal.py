@@ -7,6 +7,61 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+# Headers the auth block writes — case-insensitive. Mirror of the doctor rule
+# and the gen sanitizer. When a case's headers contain a key matching one of
+# these, and the value is non-empty, sending both the case and auth-block
+# header confuses the server. The auth_required case is exempt (empty value
+# is its whole point).
+_AUTH_HEADER_DEFAULTS = {"authorization", "x-api-key", "x-auth-token"}
+
+
+def _resolve_auth_headers(spec: dict | None, cases: dict | None) -> set[str]:
+    """Pick the set of header names this project's auth block writes."""
+    names: set[str] = set(_AUTH_HEADER_DEFAULTS)
+    for src in (spec.get("auth") if isinstance(spec, dict) else None,
+                cases.get("auth") if isinstance(cases, dict) else None):
+        if not isinstance(src, dict):
+            continue
+        h = src.get("header")
+        if isinstance(h, str) and h.strip():
+            names.add(h.strip().lower())
+        # api_key provider defaults to X-API-Key even when `header` is unset.
+        if src.get("type") == "api_key":
+            names.add("x-api-key")
+    return names
+
+
+def sanitize_duplicate_auth_headers(cases_data: dict, auth_headers: set[str]) -> list[dict]:
+    """Pre-pass: drop per-case headers that conflict with the auth block.
+
+    Returns a list of {"caseId", "header"} entries — one per dropped header.
+    Auth_required cases (empty header value) are deliberately preserved; the
+    whole point of that test is to confirm the server rejects an unauthenticated
+    request.
+    """
+    removals: list[dict] = []
+    for case in cases_data.get("cases", []) or []:
+        if not isinstance(case, dict) or not case.get("id"):
+            continue
+        headers = case.get("headers")
+        if not isinstance(headers, dict) or not headers:
+            continue
+        for key in list(headers.keys()):
+            if not isinstance(key, str):
+                continue
+            if key.lower() not in auth_headers:
+                continue
+            val = headers[key]
+            if val is None or val == "":
+                continue
+            del headers[key]
+            removals.append({"caseId": case["id"], "header": key, "previousValue": val})
+        # Clean up empty-headers dict to keep JSON files tidy.
+        if isinstance(case.get("headers"), dict) and not case["headers"]:
+            # Leave the empty dict in place — run.py expects the field.
+            pass
+    return removals
+
 
 def heuristic_diagnose(failure: dict, case: dict) -> dict:
     """Return a suggested fix for a single failure. Returns {fix: dict|None, confidence: str, reason: str}."""
@@ -117,9 +172,51 @@ def main() -> None:
     cases_data = json.loads(cases_path.read_text(encoding="utf-8"))
     cases_by_id = {c["id"]: c for c in cases_data.get("cases", [])}
 
+    # Load spec if provided. Used to resolve which auth header names to
+    # sanitize (mirror of doctor/gen logic).
+    spec_data: dict | None = None
+    if args.spec:
+        spec_path = Path(args.spec)
+        if spec_path.exists():
+            try:
+                spec_data = json.loads(spec_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                spec_data = None
+    auth_headers = _resolve_auth_headers(spec_data, cases_data if isinstance(cases_data, dict) else None)
+
+    # Pre-pass: strip duplicate auth headers. Tracked separately so the user
+    # can see what was removed even when it's not "a fix" in the traditional
+    # sense — this is a config cleanup that precedes the assertion-level heal.
+    header_removals = sanitize_duplicate_auth_headers(
+        cases_data, auth_headers) if isinstance(cases_data, dict) else []
+    if header_removals:
+        print(f"Sanitized {len(header_removals)} duplicate-auth-header entries (pre-pass)",
+              file=sys.stderr)
+
     failures = [r for r in results.get("results", []) if r["status"] != "passed"]
     if not failures:
-        print("OK  no failures, nothing to heal", file=sys.stderr)
+        # No assertion-level fixes — but we may still have header cleanup to write.
+        if header_removals and not args.dry_run:
+            if not args.no_backup:
+                shutil.copy(cases_path, cases_path.with_suffix(".json.bak"))
+            cases_path.write_text(json.dumps(cases_data, indent=2, ensure_ascii=False), encoding="utf-8")
+            print(f"Wrote {cases_path} (header cleanup only)", file=sys.stderr)
+        else:
+            print("OK  no failures, nothing to heal", file=sys.stderr)
+        report = {
+            "version": "1.0",
+            "summary": {
+                "total_failures": 0, "patterns": 0, "fixes_proposed": 0,
+                "fixes_applied": 0, "header_removals": len(header_removals),
+                "dry_run": bool(args.dry_run),
+            },
+            "headerRemovals": header_removals,
+            "patterns": [], "fixes": [],
+            "ai_prompt": "",
+        }
+        Path(args.report).write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+        if args.json:
+            print(json.dumps(report, indent=2, ensure_ascii=False))
         return
 
     # Group by pattern
@@ -174,7 +271,10 @@ def main() -> None:
         shutil.copy(cases_path, cases_path.with_suffix(".json.bak"))
 
     applied_count = sum(1 for f in fixes if f["applied"])
-    if applied_count > 0 and not args.dry_run:
+    # Track whether anything was modified so we know to (re)write cases.
+    # With --dry-run we still want the report, but we never overwrite the file.
+    any_modified = applied_count > 0 or bool(header_removals)
+    if any_modified and not args.dry_run:
         cases_path.write_text(json.dumps(cases_data, indent=2, ensure_ascii=False), encoding="utf-8")
     elif args.dry_run:
         # Treat dry-run as a preview: nothing was applied, but report it clearly.
@@ -197,14 +297,19 @@ def main() -> None:
             "patterns": len(groups),
             "fixes_proposed": len(fixes),
             "fixes_applied": applied_count,
+            "header_removals": len(header_removals),
             "dry_run": bool(args.dry_run),
         },
         "patterns": [{"key": k, "count": len(v), "caseIds": [f["caseId"] for f in v]} for k, v in groups.items()],
         "fixes": fixes,
+        "headerRemovals": header_removals,
         "ai_prompt": "\n".join(ai_prompt_lines) if unfixed else "",
     }
     Path(args.report).write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"OK  {len(failures)} failures  {applied_count} fixed  {args.report}", file=sys.stderr)
+    if header_removals and not args.dry_run:
+        print(f"    {len(header_removals)} duplicate auth header(s) stripped "
+              f"(see headerRemovals in the report)", file=sys.stderr)
     if unfixed:
         print(f"    {len(unfixed)} unfixed — see ai_prompt in the report for AI diagnosis", file=sys.stderr)
     if args.dry_run:

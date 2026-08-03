@@ -120,10 +120,15 @@ def render(results: dict, baseline: dict | None = None, title: str = "Test Repor
 
     rows = []
     for r in results["results"]:
+        # Boundary cases use status_in (accepts 200/201/204/400/422) — surface
+        # that explicitly so users don't read a 422 as a real defect.
+        category_note = ""
+        if r["category"] == "boundary":
+            category_note = ' <span class="badge small" style="background:#0891b2">status_in</span>'
         rows.append(f"""<tr>
   <td>{status_badge(r['status'])}</td>
   <td><code>{esc(r['caseId'])}</code></td>
-  <td>{esc(r['category'])}</td>
+  <td>{esc(r['category'])}{category_note}</td>
   <td>{esc(r.get('httpStatus', '-'))}</td>
   <td>{esc(r.get('durationMs', '-'))}ms</td>
   <td>{failure_badge(r.get('failureClass'))}</td>
@@ -135,12 +140,22 @@ def render(results: dict, baseline: dict | None = None, title: str = "Test Repor
         body = (r.get("response") or {}).get("body", "") or ""
         body = body[:500] + ("..." if len(body) > 500 else "")
         err = r.get("error") or ""
+        boundary_hint = ""
+        # Heuristic: if a boundary case ended in 400/422 via the status_in
+        # assertion, that may be the intended rejection side of the boundary —
+        # not a defect. Surface the hint in the failure detail pane.
+        if (r.get("category") == "boundary"
+                and r.get("httpStatus") in (400, 422)
+                and r.get("failureClass") == "assertion_failed"):
+            boundary_hint = ('\n  NOTE: boundary case expects [200/201/204/400/422]; '
+                             'an observed 4xx may be the intended rejection. '
+                             'Confirm before treating as a defect.\n')
         detail_rows.append(f"""<details>
   <summary><code>{esc(r['caseId'])}</code> — {esc(r.get('failureClass', r['status']))}</summary>
   <pre>URL:    {esc(r.get('request', {}).get('url', ''))}
 Status:  {esc(r.get('httpStatus', '-'))}
 Failed:  {esc(r.get('failureClass', '-'))}
-Error:   {esc(err)}
+Error:   {esc(err)}{boundary_hint}
 ----- Response body -----
 {esc(body)}</pre>
 </details>""")
@@ -149,6 +164,42 @@ Error:   {esc(err)}
         f'<div class="card"><div class="num">{n}</div><div class="lbl">{esc(k)}</div></div>'
         for k, n in sorted(by_class.items(), key=lambda x: -x[1])
     )
+
+    # Category × failure-class matrix. Helps catch the case where boundary
+    # cases are being misattributed (e.g. all boundary cases hitting
+    # authentication means the auth header is broken, not the API).
+    categories = sorted({r["category"] for r in results["results"]} | {"positive", "negative", "boundary", "security", "idempotency"})
+    failure_classes = ["assertion_failed", "server_error", "network_error", "config_error", "authentication"]
+    matrix: dict[tuple[str, str], int] = {}
+    for r in results["results"]:
+        if r["status"] == "passed":
+            continue
+        matrix[(r.get("category", ""), r.get("failureClass") or "unknown")] = (
+            matrix.get((r.get("category", ""), r.get("failureClass") or "unknown"), 0) + 1)
+    matrix_rows = []
+    for cat in categories:
+        cells = []
+        non_empty = False
+        for fc in failure_classes:
+            n = matrix.get((cat, fc), 0)
+            cells.append(f"<td>{n if n else ''}</td>")
+            if n:
+                non_empty = True
+        if non_empty:
+            matrix_rows.append(f"<tr><th>{esc(cat)}</th>{''.join(cells)}</tr>")
+    matrix_table = ""
+    if matrix_rows:
+        matrix_table = f"""
+<div class="section">
+  <h2>Failures by category × failure class</h2>
+  <table>
+    <tr><th>Category \\ Failure</th>{''.join(f'<th>{esc(fc)}</th>' for fc in failure_classes)}</tr>
+    {''.join(matrix_rows)}
+  </table>
+  <p class="meta">Empty cells = no failures in that bucket. A boundary row full of
+  <code>assertion_failed</code> usually means a generator assumption about the API shape; a row of
+  <code>authentication</code> usually means header setup is broken.</p>
+</div>"""
 
     slow_rows = "".join(
         f"<tr><td><code>{esc(r['caseId'])}</code></td><td>{r.get('durationMs', 0)}ms</td><td>{esc(r.get('httpStatus', '-'))}</td></tr>"
@@ -199,6 +250,8 @@ Error:   {esc(err)}
 </div>
 
 {('<div class="section"><h2>Failure breakdown</h2><div class="summary">' + class_cards + trend_badges + '</div></div>') if class_cards or trend_badges else ''}
+
+{matrix_table}
 
 {trend_html}
 

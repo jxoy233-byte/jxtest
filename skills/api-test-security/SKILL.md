@@ -57,6 +57,7 @@ jxtest security api-spec.json --rules examples/security-rules.json
     "total_probes": 47,
     "vulnerabilities": 3,
     "server_errors": 2,
+    "config_findings": 1,
     "by_severity": {"critical": 1, "high": 2}
   },
   "findings": [
@@ -69,11 +70,19 @@ jxtest security api-spec.json --rules examples/security-rules.json
       "remediation": "Enforce per-request ownership: pull user_id from the JWT/session, then compare against the resource's owner_id before returning data.",
       "fixExample": "function assertOwns(req, resource) { if (resource.owner_id !== req.user.id) return res.status(403).send(); }"
     }
+  ],
+  "configFindings": [
+    {
+      "securityType": "config_duplicate_auth_header",
+      "severity": "low",
+      "isConfigFinding": true,
+      "evidence": "12 endpoint(s) declare a header parameter that matches the auth header — probes against them may send duplicate headers and get spurious results."
+    }
   ]
 }
 ```
 
-Every finding ships with a `remediation` line + `fixExample` snippet — a paste-ready fix for the stack you can review against. `vulnerabilities` only counts confirmed exploits. `server_errors` are reported separately (and capped at `medium` severity) — they're signals about API defects, not confirmed vulnerabilities.
+Every finding ships with a `remediation` line + `fixExample` snippet — a paste-ready fix for the stack you can review against. `vulnerabilities` only counts confirmed exploits. `server_errors` are reported separately (and capped at `medium` severity) — they're signals about API defects, not confirmed vulnerabilities. **Config findings** are tooling/spec smells that *inhibit* detection (e.g. an OpenAPI parameter that collides with the auth header) — surfaced at `low` severity so they don't drown real findings but the user knows.
 
 ## Custom rules (`--rules`)
 

@@ -557,6 +557,55 @@ def main() -> None:
     for f in findings:
         by_severity[f["severity"]] = by_severity.get(f["severity"], 0) + 1
 
+    # Config findings — separate from real vulnerabilities. These flag
+    # tooling/spec smells that *inhibit* detection: when the auth header is
+    # duplicated, the auth block's real token is masked and the server sees
+    # a junk value, producing false negatives across every probe. Surface as
+    # "low" severity so they don't drown real findings but the user knows.
+    config_findings: list[dict] = []
+    auth_header_names = {"authorization", "x-api-key", "x-auth-token"}
+    spec_auth_header = ""
+    spec_auth = spec.get("auth") if isinstance(spec, dict) else None
+    if isinstance(spec_auth, dict):
+        h = spec_auth.get("header")
+        if isinstance(h, str) and h.strip():
+            spec_auth_header = h.strip().lower()
+            auth_header_names = auth_header_names | {spec_auth_header}
+    spec_auth_header_set = {h for h in auth_header_names}
+    duplicate_header_specs: list[dict] = []
+    for ep in spec.get("endpoints", []) or []:
+        if not isinstance(ep, dict):
+            continue
+        for p in ep.get("parameters", []) or []:
+            if not isinstance(p, dict):
+                continue
+            if p.get("in") == "header" and isinstance(p.get("name"), str) and p["name"].lower() in spec_auth_header_set:
+                duplicate_header_specs.append({
+                    "endpointId": ep.get("id"),
+                    "method": ep.get("method"),
+                    "path": ep.get("path"),
+                    "header": p["name"],
+                })
+    if duplicate_header_specs:
+        config_findings.append({
+            "securityType": "config_duplicate_auth_header",
+            "severity": "low",
+            "vulnerable": False,
+            "isConfigFinding": True,
+            "evidence": (f"{len(duplicate_header_specs)} endpoint(s) declare a header parameter that "
+                         "matches the auth header — probes against them may send duplicate headers "
+                         "and get spurious results."),
+            "description": ("Tooling config: an OpenAPI parameter with `in: header` and a name "
+                            "matching the auth block (Authorization / X-API-Key / X-Auth-Token) "
+                            "is treated as user data and duplicates the auth block's header. "
+                            "`jxtest gen` strips these out; security probes don't, so results may be misleading."),
+            "remediation": ("Re-author the spec to remove header params whose names collide with "
+                            "the project's auth header, or move auth to a different header name."),
+            "fixExample": ("# spec.yml — remove the auth-shaped parameter; auth block already "
+                          "manages Authorization\n# parameters:\n#   - name: authorization\n#     in: header\n#     ❌ drop this"),
+            "duplicateEndpoints": duplicate_header_specs[:20],
+        })
+
     out = {
         "version": "1.0",
         "baseUrl": base_url,
@@ -565,11 +614,13 @@ def main() -> None:
             "total_probes": len(cases),
             "vulnerabilities": len(confirmed),
             "server_errors": len(server_errors),
+            "config_findings": len(config_findings),
             "by_severity": by_severity,
             "by_attack": {t: sum(1 for f in findings if f["securityType"] == t)
                           for t in {f["securityType"] for f in findings}},
         },
-        "findings": findings,
+        "findings": findings + config_findings,
+        "configFindings": config_findings,
 
         "raw": results,
     }

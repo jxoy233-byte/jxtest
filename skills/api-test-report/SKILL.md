@@ -1,6 +1,6 @@
 ---
 name: api-test-report
-description: Generate a human-readable HTML report from `test-results.json`. Use this skill after `/api-test-run` produced results, or when the user wants to "render a report", "summarize test results", "show me what failed".
+description: Generate a human-readable HTML report from `test-results.json`. Use this skill after `/api-test-run` produced results, or when the user wants to "render a report", "summarize test results", "show me what failed". **Surfaces boundary failures appropriately (status_in accepts 200/201/204/400/422), renders a category × failure-class matrix, and groups auth-blocked cases.**
 ---
 
 # api-test-report
@@ -24,9 +24,10 @@ The report contains:
 - **Header**: title, run timestamp, total duration
 - **Summary cards**: total, passed, failed, errors, pass rate
 - **Failure breakdown**: by `failureClass` (server_error / assertion_failed / network_error / config_error)
+- **Failures by category × failure class** (new): a matrix that makes it obvious when, e.g., all `boundary` cases are landing in `authentication` (auth header broken, not the API).
 - **Slowest tests**: top 5 by duration
-- **Test table**: every case with caseId, status, duration, http status, failure class
-- **Failure details**: expandable rows showing request URL + response body snippet
+- **Test table**: every case with caseId, status, duration, http status, failure class; boundary rows get a `status_in` badge so a 4xx here isn't mistaken for a defect.
+- **Failure details**: expandable rows showing request URL + response body snippet. Boundary cases that ended in 400/422 carry an explicit NOTE: an observed 4xx may be the intended rejection side.
 
 ## Steps
 

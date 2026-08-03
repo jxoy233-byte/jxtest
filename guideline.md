@@ -214,3 +214,22 @@
 ## 更新记录
 
 - 2026-08-02: 创建初始版，定义 8 个 Skill 蓝图
+- 2026-08-03 (v1.1): 优化 jxtest per experience report — `Optimize jxtest per experience report`
+- 2026-08-03 (v1.2): AI-native preflight + safer auto-heal — `Fix P0 crash + harden UX per ERP实战问题汇总`，新增 `doctor` skill，断言自愈走纯启发式
+- 2026-08-03 (v1.3): per ERP 实战 v2 体验报告
+
+  **核心 bug 修复**
+  - `gen` 的 `_fill_params` 现在跳过 auth header 形参(`Authorization` / `X-API-Key` / `X-Auth-Token`,或 `spec.auth.header` 指定);原本会把 OpenAPI 里的 `parameters[].in=header, name=authorization` 当成 query 写入 case.headers,与 auth block 同时下发造成 124 条废 case。stderr 列出被剔除项。
+
+  **六层防御 + 可视性**
+  - `doctor` 新检查 `duplicate_auth_header`(warning):扫 case.headers 与 auth header 同名(大小写不敏感)的非空键
+  - `heal` 新 pre-pass:清理 test-cases.json 中冲突的 auth header 键,dry-run 也输出 `headerRemovals`
+  - `coverage` 新增 `not_called_due_to_auth` + `effective_coverage_pct`:区分"未调用"和"调用了但全是 401/403"
+  - `report` HTML 报告新增 "Failures by category × failure class" 矩阵;boundary 行加 `status_in` 徽章;boundary+4xx 失败详情里加 NOTE
+  - `env` `env set` 检测头部形 key 名(`Authorization`/`X-API-Key`/`X-Auth-Token`/`Cookie`)或值以 `Bearer ` 开头,提示改用 `test-cases.json:auth`;`env validate` 也把这类 key 列为 issue
+  - `security` 引入 `configFindings[]`(severity=low,与 vulnerabilities 分开):扫 spec 里与 auth header 同名的 `parameters[].in=header`,给 remediation
+
+  **文档**
+  - `SKILL.md`(主)+ 6 个分片 SKILL.md 同步更新
+  - README Highlights 加 3 条
+  - bin/jxtest `--version` 1.2 → 1.3

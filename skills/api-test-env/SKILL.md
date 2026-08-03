@@ -1,6 +1,6 @@
 ---
 name: api-test-env
-description: Manage environment files and resolve variables (Postman-style `{{var}}` templating). Use this skill when the user wants to "set up environments", "manage dev/staging/prod", "use variables in tests", "switch environment", or before running tests that need auth tokens.
+description: Manage environment files and resolve variables (Postman-style `{{var}}` templating). Use this skill when the user wants to "set up environments", "manage dev/staging/prod", "use variables in tests", "switch environment", or before running tests that need auth tokens. **Warns when an env key looks like an HTTP header — those don't reach requests, use `test-cases.json:auth` for authentication.**
 ---
 
 # api-test-env
@@ -87,6 +87,17 @@ When `--env` is passed, `api-test-run` loads `env/<name>.json` + `global.json` a
 - **No nesting**: values are strings/numbers; `{{var}}` only in template strings, not in keys.
 - **Missing var = error**: if `{{var}}` can't be resolved, the command fails with a clear message indicating which env and which var.
 - **Idempotent**: `set` updates the file in place; same command produces same state.
+- **Auth belongs in `test-cases.json:auth`, not env vars.** Env doesn't define per-request HTTP headers — `{{var}}` placeholders expand in path / query / body but never become real `Authorization` headers. `env set` will warn if the key looks like an HTTP header (`Authorization`, `X-API-Key`, `X-Auth-Token`, `Cookie`) or the value starts with `Bearer `. For dynamic auth, use the login flow:
+
+  ```json
+  {
+    "auth": {"type": "login", "url": "/auth/login",
+              "body": {"username": "{{USER}}", "password": "{{PASS}}"},
+              "tokenPath": "data.access_token"}
+  }
+  ```
+
+  `env validate` also flags header-shaped keys and tells you so.
 
 ## Next step
 

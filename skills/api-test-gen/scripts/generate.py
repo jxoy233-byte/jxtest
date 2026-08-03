@@ -15,13 +15,39 @@ from contract import (
 # have nothing to do with the endpoint, so they get demoted instead.
 NO_SCHEMA = object()
 
+# Well-known auth header names. Spec.auth.header (when present) is also added
+# to this set so login/bearer/api_key auth providers are recognized correctly.
+# Compared case-insensitively. HTTP headers are case-insensitive per RFC 7230,
+# but the stdlib HTTP client will happily send both `Authorization` and
+# `authorization` — servers see both and either reject or use a wrong one.
+_KNOWN_AUTH_HEADERS = {"Authorization", "X-API-Key", "X-Auth-Token"}
+
+# Headers we deliberately skipped because the auth block owns them. Reset at
+# the top of main() and printed once at the end so the user can see what was
+# removed. Module-level to avoid threading a parameter through every generator.
+DROPPED_AUTH_HEADERS: list[str] = []
+
+
+def auth_header_names(spec_auth: dict | None) -> set[str]:
+    """Return the set of header names this project's auth provider writes.
+    Read from spec.auth.header when present; otherwise the common defaults.
+    Used to skip duplicating these in per-case headers.
+    """
+    names = set(_KNOWN_AUTH_HEADERS)
+    if isinstance(spec_auth, dict):
+        h = spec_auth.get("header")
+        if isinstance(h, str) and h.strip():
+            names.add(h.strip())
+    return {n.lower() for n in names}
+
 
 def has_unusable_body(endpoint: dict) -> bool:
     """True when the endpoint takes a body but the spec says nothing about its shape."""
     return _fill_body(endpoint) is NO_SCHEMA
 
 
-def gen_positive(endpoint: dict, contract_body: dict | None = None) -> list[dict]:
+def gen_positive(endpoint: dict, contract_body: dict | None = None,
+                 skip_headers: set[str] | None = None) -> list[dict]:
     """Happy-path case. Schema-less bodies get a 'must be rejected' case instead,
     unless a contract was supplied for this endpoint."""
     if has_unusable_body(endpoint):
@@ -31,29 +57,31 @@ def gen_positive(endpoint: dict, contract_body: dict | None = None) -> list[dict
             return [_make_case(endpoint, id_suffix="positive",
                                name_suffix="happy path (from contract)",
                                category="positive",
-                               body_override=contract_body)]
+                               body_override=contract_body,
+                               skip_headers=skip_headers)]
         return [{
             "id": f"{endpoint['id']}_negative_empty_body",
             "endpointId": endpoint["id"],
             "name": f"{endpoint['method']} {endpoint['path']} - empty body must be rejected",
             "category": "negative",
             "method": endpoint["method"],
-            "path": _resolve_path(endpoint["path"], _fill_params(endpoint)[1]),
+            "path": _resolve_path(endpoint["path"], _fill_params(endpoint, skip_headers=skip_headers)[1]),
             "headers": {"Content-Type": "application/json"},
             "query": {},
             "body": {},
             "assertions": [{"type": "business_not_ok"}],
             "note": "spec declares no request body schema — add a schema or contract to generate a happy-path case",
         }]
-    return [_make_case(endpoint, id_suffix="positive", name_suffix="happy path", category="positive")]
+    return [_make_case(endpoint, id_suffix="positive", name_suffix="happy path", category="positive",
+                       skip_headers=skip_headers)]
 
 
 
 def _make_case(endpoint: dict, id_suffix: str, name_suffix: str, category: str,
                query_override: dict | None = None, path_override: dict | None = None,
-               body_override=None) -> dict:
+               body_override=None, skip_headers: set[str] | None = None) -> dict:
     """Build a positive-style case with optional param/body overrides."""
-    query, path_params, headers = _fill_params(endpoint, mode="valid")
+    query, path_params, headers = _fill_params(endpoint, mode="valid", skip_headers=skip_headers)
     if query_override:
         query.update(query_override)
     if path_override:
@@ -209,7 +237,7 @@ def gen_security(endpoint: dict) -> list[dict]:
 
 
 
-def gen_enum_coverage(endpoint: dict) -> list[dict]:
+def gen_enum_coverage(endpoint: dict, skip_headers: set[str] | None = None) -> list[dict]:
     """One positive case per enum value (so spec coverage = 100%)."""
     cases = []
     seen: set = set()
@@ -224,11 +252,12 @@ def gen_enum_coverage(endpoint: dict) -> list[dict]:
             pa = {p["name"]: val} if p["in"] == "path" else None
             cases.append(_make_case(endpoint, f"enum_{p['name']}_{val}",
                                     f"enum {p['name']}={val}", "positive",
-                                    query_override=q, path_override=pa))
+                                    query_override=q, path_override=pa,
+                                    skip_headers=skip_headers))
     return cases
 
 
-def gen_format_validation(endpoint: dict) -> list[dict]:
+def gen_format_validation(endpoint: dict, skip_headers: set[str] | None = None) -> list[dict]:
     """For string params with format=email/uuid/uri/date-time, assert response stays sane."""
     samples = {"email": "test@example.com", "uuid": "00000000-0000-0000-0000-000000000000",
                "uri": "https://example.com/x", "date-time": "2026-01-01T00:00:00Z"}
@@ -241,17 +270,19 @@ def gen_format_validation(endpoint: dict) -> list[dict]:
         pa = {p["name"]: sample} if p["in"] == "path" else None
         cases.append(_make_case(endpoint, f"format_{p['format']}_{p['name']}",
                                 f"valid {p['format']} in {p['name']}", "positive",
-                                query_override=q, path_override=pa))
+                                query_override=q, path_override=pa,
+                                skip_headers=skip_headers))
     return cases
 
 
-def gen_idempotency(endpoint: dict, contract_body: dict | None = None) -> list[dict]:
+def gen_idempotency(endpoint: dict, contract_body: dict | None = None,
+                    skip_headers: set[str] | None = None) -> list[dict]:
     """For POST/PUT, send same body twice → expect same status (idempotent)."""
     if endpoint["method"] not in ("POST", "PUT", "PATCH") or not endpoint.get("requestBody"):
         return []
     if has_unusable_body(endpoint) and contract_body is None:
         return []
-    pos = gen_positive(endpoint, contract_body=contract_body)[0]
+    pos = gen_positive(endpoint, contract_body=contract_body, skip_headers=skip_headers)[0]
     pos["id"] = f"{endpoint['id']}_idempotency"
     pos["name"] = f"{endpoint['method']} {endpoint['path']} - idempotent (2x same body)"
     pos["category"] = "idempotency"
@@ -259,11 +290,13 @@ def gen_idempotency(endpoint: dict, contract_body: dict | None = None) -> list[d
     return [pos]
 
 
-def gen_auth_required(endpoint: dict, envelope: dict | None = None) -> list[dict]:
+def gen_auth_required(endpoint: dict, envelope: dict | None = None,
+                      skip_headers: set[str] | None = None,
+                      auth_header: str = "Authorization") -> list[dict]:
     """Strip Authorization header → expect 401 or 403 (only when spec has security)."""
     if not endpoint.get("security"):
         return []
-    query, path_params, _ = _fill_params(endpoint, mode="valid")
+    query, path_params, _ = _fill_params(endpoint, mode="valid", skip_headers=skip_headers)
     # Enveloped APIs answer HTTP 200 with the real code in the body, so a status
     # check would never hold; fall back to the business-level outcome there.
     assertion = {"type": "business_not_ok"} if envelope else {"type": "status_in", "expected": [401, 403]}
@@ -274,7 +307,7 @@ def gen_auth_required(endpoint: dict, envelope: dict | None = None) -> list[dict
         "category": "security",
         "method": endpoint["method"],
         "path": _resolve_path(endpoint["path"], path_params),
-        "headers": {"Authorization": ""},
+        "headers": {auth_header: ""},
         "query": query,
         "body": None,
         "assertions": [assertion],
@@ -296,10 +329,17 @@ def _resolve_path(template: str, path_params: dict) -> str:
     return out
 
 
-def _fill_params(endpoint: dict, mode: str = "valid", params: list | None = None) -> tuple[dict, dict, dict]:
-    """Build query, path_params, headers from endpoint parameters."""
+def _fill_params(endpoint: dict, mode: str = "valid", params: list | None = None,
+                 skip_headers: set[str] | None = None) -> tuple[dict, dict, dict]:
+    """Build query, path_params, headers from endpoint parameters.
+
+    Header parameters whose name (case-insensitive) is in `skip_headers` are
+    dropped — the auth block manages those headers, and sending both creates
+    a duplicate that confuses the server (see experience report 2026-08-03).
+    """
     query, path_params, headers = {}, {}, {}
     items = params if params is not None else endpoint.get("parameters", [])
+    skip = skip_headers or set()
     for p in items:
         if p.get("$ref"):
             continue
@@ -312,6 +352,9 @@ def _fill_params(endpoint: dict, mode: str = "valid", params: list | None = None
                 continue
             query[name] = str(val)
         elif p.get("in") == "header":
+            if name.lower() in skip:
+                DROPPED_AUTH_HEADERS.append(f"{endpoint.get('id', '?')}.{name}")
+                continue
             headers[name] = str(val)
     return query, path_params, headers
 
@@ -490,9 +533,21 @@ def main() -> None:
     envelope = spec.get("envelope")
     contract = load_contract(args.contract)
     contract_fields = contract.get("contracts") or {}
+    # Reset per-run accumulator so re-invocations in one process don't pollute.
+    DROPPED_AUTH_HEADERS.clear()
     cases: list[dict] = []
     schema_less: list[str] = []
     contract_filled: list[str] = []
+    skip_headers = auth_header_names(spec.get("auth"))
+    # The auth_required case wants to send an empty header *that the auth
+    # block will overwrite* (so the test still proves "without a real token,
+    # server rejects"). Use the spec-defined header name when available.
+    auth_header_name = "Authorization"
+    spec_auth = spec.get("auth")
+    if isinstance(spec_auth, dict):
+        h = spec_auth.get("header")
+        if isinstance(h, str) and h.strip():
+            auth_header_name = h.strip()
     for ep in spec.get("endpoints", []):
         # If the endpoint has no usable body schema but does have a contract,
         # synthesize a body from the contract's required fields.
@@ -504,7 +559,7 @@ def main() -> None:
         if has_unusable_body(ep) and contract_body is None:
             schema_less.append(f"{ep['method']} {ep['path']}")
         if "positive" in cats:
-            cases.extend(gen_positive(ep, contract_body=contract_body))
+            cases.extend(gen_positive(ep, contract_body=contract_body, skip_headers=skip_headers))
         if "negative" in cats:
             cases.extend(gen_missing_required(ep))
         if "boundary" in cats:
@@ -515,13 +570,14 @@ def main() -> None:
             cases.extend(bc)
         if "security" in cats:
             cases.extend(gen_security(ep))
-            cases.extend(gen_auth_required(ep, envelope))
+            cases.extend(gen_auth_required(ep, envelope, skip_headers=skip_headers,
+                                           auth_header=auth_header_name))
         if "enum" in cats:
-            cases.extend(gen_enum_coverage(ep))
+            cases.extend(gen_enum_coverage(ep, skip_headers=skip_headers))
         if "format" in cats:
-            cases.extend(gen_format_validation(ep))
+            cases.extend(gen_format_validation(ep, skip_headers=skip_headers))
         if "idempotency" in cats:
-            cases.extend(gen_idempotency(ep, contract_body=contract_body))
+            cases.extend(gen_idempotency(ep, contract_body=contract_body, skip_headers=skip_headers))
 
     out = {
         "version": "1.0",
@@ -551,6 +607,19 @@ def main() -> None:
         print(f"    {cat}: {n}", file=sys.stderr)
     if contract_filled:
         print(f"    filled from contract: {len(contract_filled)} endpoints", file=sys.stderr)
+    if DROPPED_AUTH_HEADERS:
+        # Dedup — same endpoint may be referenced multiple times across categories.
+        seen = set()
+        unique = []
+        for h in DROPPED_AUTH_HEADERS:
+            if h not in seen:
+                seen.add(h)
+                unique.append(h)
+        print(f"    skipped auth header params: {len(unique)} (auth block owns these)", file=sys.stderr)
+        for h in unique[:5]:
+            print(f"      {h}", file=sys.stderr)
+        if len(unique) > 5:
+            print(f"      ... and {len(unique) - 5} more", file=sys.stderr)
     if schema_less:
         print(f"    still missing: {len(schema_less)} endpoints (no schema, no contract — "
               f"run `gen --contract-gap` for structured list):", file=sys.stderr)

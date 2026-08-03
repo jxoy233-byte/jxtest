@@ -52,7 +52,7 @@ copy bin\jxtest %LOCALAPPDATA%\Programs\Python\Python311\Scripts\jxtest.cmd
 
 ```bash
 jxtest --help       # shows all 17 commands
-jxtest --version    # 1.0
+jxtest --version    # 1.3
 ```
 
 ## Quick start
@@ -81,7 +81,9 @@ That's it. No virtualenv, no Docker, no Node.js, no GUI.
 - **Extract topological parallel** — when a case has `extract`, the runner builds a dependency graph and runs independent cases in parallel within their phase. No more "one case extracts → entire run goes sequential".
 - **Dynamic variables** — `{{$timestamp}}`, `{{$uuid}}`, `{{$randomInt}}`, `{{$iso}}` are evaluated fresh per substitution. Override via scope for deterministic snapshots.
 - **Isolated endpoints** — `meta.isolated: true` for logout / password-change / account-delete. Runner snapshots auth, gets a fresh token for the case only, then restores. No more "one logout poisons the whole run".
-- **Coverage that catches lies** — endpoint coverage alone hides the "we hit it, never saw its 422" gap. Coverage now reports declared-but-unseen response codes and (under envelope) outcome distribution.
+- **Coverage that catches lies** — endpoint coverage alone hides the "we hit it, never saw its 422" gap. Coverage now reports declared-but-unseen response codes and (under envelope) outcome distribution. Plus `not_called_due_to_auth` flags endpoints where every attempt failed 401/403 — without that bucket, "75% covered" can hide 0% real coverage of half the API.
+- **Auth-header sanity** — when an OpenAPI parameter has `in: header` and a name that collides with the project's auth header, `gen` strips it (the auth block already writes one). `doctor --strict` flags cases that still have the duplicate; `heal` cleans them up automatically; `env set` warns when an env key looks like an HTTP header (auth belongs in `test-cases.json:auth`, not env vars).
+- **Category × failure-class matrix in reports** — when the report shows every boundary case falling into `authentication`, the bug is the auth header, not the API. Plus boundary rows get a `status_in` badge and a NOTE on observed 4xx so the report reader stops treating "API rejected a boundary value" as a defect.
 - **E2E business scenarios** — `jxtest scenario` chains a real user flow (login → list → create → get → delete) so the suite catches bugs no per-endpoint test can: token expiration, ownership, follow-up consistency.
 - **Test-data factory + cleanup** — `jxtest factory` generates parallel-safe unique data per test, then auto-emits a `cleanup-cases.json` that DELETEs what the run created. CI leaves no rows behind.
 - **Step-up capacity testing** — `jxtest load --ramp-step N` runs N stages of escalating VUs and prints a one-line-per-stage summary, so capacity planners can pick the row "before the bend".

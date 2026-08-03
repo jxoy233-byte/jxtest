@@ -38,6 +38,7 @@ Find what's NOT tested. Compute coverage metrics from `test-results.json` agains
 7. **Per-endpoint stats** — total/passed/failed cases, categories seen, statuses seen
 8. **Untested endpoints** — explicit list with `method` + `path`
 9. **Failures by endpoint** — group failed cases for triage
+10. **`not_called_due_to_auth`** — endpoints that produced results but every attempt was a 401/403. Real coverage of their behaviour is 0%. Combined with `untested_endpoints`, this gives **effective coverage** (the count the user actually wants). Run `jxtest doctor --strict` to surface the underlying config issue; `jxtest heal` auto-strips duplicate headers.
 
 ## Usage
 
