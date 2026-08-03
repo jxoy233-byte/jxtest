@@ -54,23 +54,29 @@ The script applies accepted fixes to `test-cases.json` and writes a heal report.
 
 ## Steps
 
-1. **Run heal**:
+1. **Run heal (default: dry-run)**:
    ```bash
    jxtest heal \
      test-results.json \
      --cases test-cases.json \
      --spec api-spec.json \
-     --report test-heal-report.json
+     --report test-heal-report.json \
+     --dry-run --json | jq '.summary, .fixes[:3]'
    ```
+   `--dry-run` is now the default for AI-driven workflows: the report lists every
+   proposed fix, its `confidence`, the `sideEffect`, and an `alternativeFix`
+   pointing at the config or command that should be checked first. Nothing is
+   written to `test-cases.json` until you re-run without `--dry-run`.
 
-2. **Read the report**:
+2. **Apply fixes** (only after the AI reviewed the report):
    ```bash
-   jq '.fixes[] | {caseId, before, after, confidence, applied}' test-heal-report.json
+   jxtest heal test-results.json --cases test-cases.json
    ```
+   A `test-cases.json.bak` is created before any write.
 
 3. **Re-run tests** to verify:
    ```bash
-   jxtest run test-cases.json --env staging
+   jxtest run test-cases.json --env staging --json | jq '.summary, .failures[:3]'
    ```
 
 ## Rules

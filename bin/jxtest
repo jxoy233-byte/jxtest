@@ -26,6 +26,7 @@ CMDS = {
     "scenario": ("api-test-scenario", "scenario.py"),
     "factory": ("api-test-factory", "factory.py"),
     "suite":    ("api-test-suite",  "suite.py"),
+    "doctor":   ("api-test-doctor",  "doctor.py"),
 }
 
 HELP = """jxtest — AI-native API testing toolkit
@@ -50,6 +51,7 @@ Commands:
   scenario  Generate end-to-end business scenario test cases (login → action → verify)
   factory   Generate per-test unique data + auto-cleanup after the run
   suite     Manage named test suites (save filter presets, run by name)
+  doctor    Preflight spec/cases/env/auth/envelope/dependencies and suggest next steps
   completion Generate shell completion (bash|zsh|fish)
 
 Examples:
@@ -72,7 +74,7 @@ def main() -> None:
         print(HELP)
         sys.exit(0)
     if sys.argv[1] in ("-V", "--version"):
-        print("jxtest 1.0")
+        print("jxtest 1.2")
         sys.exit(0)
 
     cmd = sys.argv[1]

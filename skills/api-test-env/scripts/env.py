@@ -9,6 +9,9 @@ from pathlib import Path
 ENV_DIR = Path("env")
 GLOBAL_FILE = Path("global.json")
 SECRET_KEYS = re.compile(r"(token|secret|key|password|api_key)", re.IGNORECASE)
+# Imported from _common to keep regex behavior consistent across the toolkit.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from _common.resolve import VAR_RE, _DYNAMIC_VAR_RE  # noqa: E402
 
 
 def list_envs() -> list[Path]:
@@ -42,6 +45,11 @@ def mask_value(key: str, value) -> str:
             return value[:2] + "*" * (len(value) - 4) + value[-2:]
         return "***"
     return str(value)
+
+
+def _extract_vars(serialized: str) -> set[str]:
+    """Pull every {{var}} token out of a serialized JSON-ish blob."""
+    return {match.group(1).strip() for match in VAR_RE.finditer(serialized or "")}
 
 
 def resolve_vars(template: str, scopes: list[dict]) -> str:
@@ -173,32 +181,89 @@ def cmd_test(args: argparse.Namespace) -> None:
 
 
 def cmd_validate(args: argparse.Namespace) -> None:
-    """Check that env values cover all {{var}} used in test-cases.json."""
+    """Check that env values cover all {{var}} referenced in spec + test cases.
+
+    Improvements over the original:
+      - scans test-cases.json (auth + headers + body + query) for refs the spec
+        may not mention;
+      - distinguishes missing values from placeholder values (REPLACE_ME / TODO
+        / CHANGE_ME / empty strings) so the AI can fix the right one;
+      - flags dynamic ($timestamp, $uuid, ...) but does not count them as
+        missing;
+      - emits stable JSON on --json for AI consumption.
+    """
     if not args.spec:
         sys.exit("Error: --spec required for validate")
-    import_cases = Path(args.spec).exists()
-    if not import_cases:
-        sys.exit(f"Error: {args.spec} not found")
-    spec = json.loads(Path(args.spec).read_text(encoding="utf-8"))
-    refs = set()
-    for ep in spec.get("endpoints", []):
-        refs.update(re.findall(r"\{\{\s*([\w.]+)\s*\}\}", json.dumps(ep, ensure_ascii=False)))
-    print(f"  vars referenced in {args.spec}: {sorted(refs)}")
+    spec_path = Path(args.spec)
+    if not spec_path.exists():
+        sys.exit(f"Error: {spec_path} not found")
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
 
-    ok = True
-    for env_path in list_envs() or [Path("env/local.json")]:
-        env_path = Path(env_path)
+    refs: set[str] = set()
+    for ep in spec.get("endpoints", []):
+        refs.update(_extract_vars(json.dumps(ep, ensure_ascii=False)))
+
+    cases_refs: set[str] = set()
+    if args.cases:
+        cases_path = Path(args.cases)
+        if cases_path.exists():
+            cases = json.loads(cases_path.read_text(encoding="utf-8"))
+            cases_refs = _extract_vars(json.dumps(cases, ensure_ascii=False))
+            refs |= cases_refs
+
+    refs.discard("")  # blank references (defensive)
+    env_paths = list_envs() or ([Path(f"env/{args.env}.json")] if args.env else [Path("env/local.json")])
+
+    def collect_value(name: str, env_data: dict, global_data: dict) -> tuple[object | None, str]:
+        for src in (env_data.get("values", {}), global_data.get("values", {}), os.environ):
+            if name in src:
+                return src[name], ("env" if src is env_data.get("values", {}) else
+                                   "global" if src is global_data.get("values", {}) else "shell")
+        return None, ""
+
+    global_data = load_global()
+    results: list[dict] = []
+    for env_path in env_paths:
         if not env_path.exists():
             continue
         env_data = json.loads(env_path.read_text(encoding="utf-8"))
-        env_vars = set(env_data.get("values", {}).keys()) | {env_data.get("baseUrl", "").strip("{}")}
-        missing = refs - env_vars
-        if missing:
-            print(f"  {env_path.stem}: MISSING {sorted(missing)}")
-            ok = False
-        else:
-            print(f"  {env_path.stem}: ok")
-    if not ok:
+        missing: list[str] = []
+        placeholders: list[str] = []
+        dynamic: list[str] = []
+        for var in sorted(refs):
+            if _DYNAMIC_VAR_RE.match(var):
+                dynamic.append(var)
+                continue
+            value, source = collect_value(var, env_data, global_data)
+            if value is None or value == "":
+                missing.append(var)
+            elif isinstance(value, str) and (value.strip() in PLACEHOLDER_PATTERNS or
+                                             value.strip().startswith("{{")):
+                placeholders.append(var)
+        results.append({"env": env_path.stem, "missing": missing, "placeholders": placeholders,
+                        "dynamic": dynamic, "ok": not missing and not placeholders,
+                        "specRefs": len(refs), "casesRefs": len(cases_refs)})
+
+    report = {
+        "version": "1.0",
+        "spec": str(spec_path),
+        "cases": str(args.cases) if args.cases else None,
+        "refs": sorted(refs),
+        "envs": results,
+        "ok": all(r["ok"] for r in results),
+    }
+
+    if args.json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    else:
+        print(f"  vars referenced in {spec_path}: {len(refs)}")
+        if cases_refs:
+            print(f"  vars referenced in {args.cases}: {len(cases_refs)}")
+        for r in results:
+            status = "ok" if r["ok"] else "issues"
+            print(f"  {r['env']}: {status}  missing={r['missing']}  placeholders={r['placeholders']}")
+
+    if not report["ok"]:
         sys.exit(1)
 
 
@@ -226,6 +291,9 @@ def main() -> None:
 
     p_val = sub.add_parser("validate", help="Validate envs cover spec vars")
     p_val.add_argument("--spec", required=True)
+    p_val.add_argument("--cases", help="test-cases.json to also scan for variable references")
+    p_val.add_argument("--env", help="Default env file to evaluate (when env/ is empty)")
+    p_val.add_argument("--json", action="store_true", help="Emit stable JSON on stdout")
 
     p_test = sub.add_parser("test", help="Probe env config end-to-end (reachability + login)")
     p_test.add_argument("name")

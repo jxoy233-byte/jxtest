@@ -409,21 +409,30 @@ def build_findings(results: list[dict]) -> list[dict]:
             sec_type = r["securityType"]
             severity = SEVERITY.get(sec_type, "medium")
             observed = r.get("observed") or f"HTTP {r.get('httpStatus')}"
+            body_excerpt = (r.get("body") or "")[:160]
             evidence = f"Got {observed}, expected the request to be refused"
             # A 5xx means the probe crashed the handler. That is a defect worth
             # fixing, but it is not evidence that the attack succeeded — reporting
             # it as critical drowns the real findings.
-            if r.get("outcome") == "server_error":
+            outcome = r.get("outcome")
+            if outcome == "server_error":
                 severity = "medium" if severity in ("critical", "high") else severity
                 evidence = (f"Got {observed} — server error, likely a bug "
                             f"(missing input validation), not a confirmed vulnerability")
+            elif outcome == "unknown":
+                # Network error / unable to classify — the probe never reached
+                # a refusal or success verdict, so the result is untrustworthy.
+                # Suppress the finding rather than reporting a false positive.
+                continue
+            if body_excerpt:
+                evidence = f"{evidence}  body: {body_excerpt}"
             fix_hint, fix_example = ATTACK_FIXES.get(sec_type, ("", ""))
             findings.append({
                 "endpointId": r["endpointId"],
                 "caseId": r["caseId"],
                 "securityType": sec_type,
                 "severity": severity,
-                "vulnerable": r.get("outcome") != "server_error",
+                "vulnerable": outcome not in ("server_error", "unknown"),
                 "evidence": evidence,
                 "description": ATTACK_DESCRIPTIONS.get(sec_type, sec_type),
                 "remediation": fix_hint,

@@ -56,6 +56,31 @@ def heuristic_diagnose(failure: dict, case: dict) -> dict:
     return {"fix": None, "confidence": "low", "reason": f"unhandled pattern: {t}"}
 
 
+def _describe_side_effect(before: dict | None, after: dict | None) -> str:
+    """Explain the consequence of applying a fix in human-readable terms."""
+    if not before or not after:
+        return ""
+    if before.get("type") == "status" and after.get("type") == "status_in":
+        return "widens a strict status check to accept either the old or new status — verify this is not masking a real defect"
+    if before.get("type") == "response_time_ms" and after.get("type") == "response_time_ms":
+        return "raises the response-time threshold to 1.5x the observed value; persistent growth may indicate a real perf regression"
+    if before.get("type") == "status" and after.get("type") == "status":
+        return f"updates expected status from {before.get('expected')} to {after.get('expected')}"
+    return "modifies an assertion in place"
+
+
+def _alternative_suggestion(failure: dict, diag: dict) -> str:
+    """Point at the config / command the human should check before accepting the fix."""
+    cls = (failure or {}).get("failureClass") or ""
+    if cls == "assertion_failed":
+        return "verify the assertion matches the spec; check `jxtest doctor` for envelope suggestions"
+    if cls == "network_error":
+        return "fix base URL or connectivity before re-running"
+    if cls == "config_error":
+        return "fill in the missing env variable: `jxtest env set <env> <KEY> <VALUE>`"
+    return "review the diagnosis field on the failing result before accepting this fix"
+
+
 def group_by_pattern(failures: list[dict]) -> dict:
     """Group failures by their failure pattern (for AI prompt deduplication)."""
     groups: dict[str, list] = defaultdict(list)
@@ -76,6 +101,9 @@ def main() -> None:
     ap.add_argument("--spec", help="api-spec.json for context")
     ap.add_argument("--report", default="test-heal-report.json", help="Output report")
     ap.add_argument("--no-backup", action="store_true")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Compute fixes but do not write cases or backups (recommended default for AI)")
+    ap.add_argument("--json", action="store_true", help="Emit stable JSON on stdout")
     args = ap.parse_args()
 
     results_path = Path(args.results)
@@ -136,15 +164,21 @@ def main() -> None:
             "before": before,
             "after": after,
             "applied": applied,
+            "dryRun": bool(args.dry_run),
+            "sideEffect": _describe_side_effect(before, after),
+            "alternativeFix": _alternative_suggestion(f, diag),
         })
 
     # Backup + write
-    if not args.no_backup:
+    if not args.no_backup and not args.dry_run:
         shutil.copy(cases_path, cases_path.with_suffix(".json.bak"))
 
     applied_count = sum(1 for f in fixes if f["applied"])
-    if applied_count > 0:
+    if applied_count > 0 and not args.dry_run:
         cases_path.write_text(json.dumps(cases_data, indent=2, ensure_ascii=False), encoding="utf-8")
+    elif args.dry_run:
+        # Treat dry-run as a preview: nothing was applied, but report it clearly.
+        applied_count = 0
 
     # AI prompt (for non-applied / low-confidence ones)
     unfixed = [f for f in fixes if not f["applied"]]
@@ -163,6 +197,7 @@ def main() -> None:
             "patterns": len(groups),
             "fixes_proposed": len(fixes),
             "fixes_applied": applied_count,
+            "dry_run": bool(args.dry_run),
         },
         "patterns": [{"key": k, "count": len(v), "caseIds": [f["caseId"] for f in v]} for k, v in groups.items()],
         "fixes": fixes,
@@ -172,6 +207,10 @@ def main() -> None:
     print(f"OK  {len(failures)} failures  {applied_count} fixed  {args.report}", file=sys.stderr)
     if unfixed:
         print(f"    {len(unfixed)} unfixed — see ai_prompt in the report for AI diagnosis", file=sys.stderr)
+    if args.dry_run:
+        print("    dry-run: no cases were modified; rerun without --dry-run to apply", file=sys.stderr)
+    if args.json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":

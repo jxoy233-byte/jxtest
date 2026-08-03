@@ -28,26 +28,27 @@ jxtest replaces Postman/Insomnia for AI-driven workflows. From an OpenAPI/Postma
 
 **Single CLI**: `jxtest <command> [args]`. Forward args; structured JSON in, structured JSON out.
 
-## The 17 CLI commands (the only thing you need to remember)
+## The 18 CLI commands (the only thing you need to remember)
 
 | Command | Purpose |
 |---------|---------|
 | `schema <file>` | Parse OpenAPI/Postman/HAR → `api-spec.json` |
 | `gen` | Generate `test-cases.json` from spec |
 | `validate` | Validate `test-cases.json` structure |
-| `env` | Manage env files (list/show/create/set/resolve) |
+| `env` | Manage env files (list/show/create/set/resolve/validate) |
 | `mock` | Run stateful mock server from spec |
-| `run` | Run functional tests |
+| `run` | Run functional tests (`--json` / `--explain <caseId>`) |
 | `load` | Run load/stress tests with SLA + baseline |
-| `security` | Run OWASP API Top 10 probes |
+| `security` | Run OWASP API Top 10 probes (envelope-aware) |
 | `diff` | Compare two specs → breaking changes |
 | `coverage` | Analyze coverage gaps (results vs spec) |
-| `heal` | Self-heal failed assertions |
+| `heal` | Self-heal failed assertions (default `--dry-run --json`) |
 | `report` | HTML report (with `--baseline` for trend delta) |
 | `doc` | Markdown API docs |
-| `scenario` | Generate end-to-end business flow (login → action → verify) |
+| `scenario` | Generate end-to-end business flow (`--discover` proposes chains) |
 | `factory` | Generate unique data + auto-cleanup after the run |
 | `suite` | Save/run named test-suite filter presets |
+| `doctor` | Preflight spec/cases/env/auth/envelope/dependencies and suggest next steps |
 | `completion` | Print shell completion script (bash \| zsh \| fish) |
 
 ## Standard workflow (run these in order)
@@ -105,6 +106,7 @@ jxtest coverage results.json --spec api-spec.json
 | "create test data per run" / "cleanup after" | `factory` |
 | "test how it scales" / "find the capacity cliff" | `load --ramp-step N` |
 | "tab-complete in bash/zsh" | `eval "$(jxtest completion bash)"` |
+| "is my config valid" / "what's wrong" / "missing env var" / "extract path looks wrong" | `doctor --json` (first call; emits ready-to-run fix commands) |
 
 ## Use case patterns
 

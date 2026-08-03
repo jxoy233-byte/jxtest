@@ -182,22 +182,27 @@ def main():
         factory_doc = json.loads(Path(args.factory).read_text(encoding="utf-8"))
         results_doc = json.loads(Path(args.results).read_text(encoding="utf-8"))
         cases = build_cleanup_cases(factory_doc, results_doc)
-        tmp = Path("/tmp/jxtest-cleanup-cases.json")
-        tmp.write_text(json.dumps({
-            "version": "1.0",
-            "baseUrl": args.base_url,
-            "auth": factory_doc.get("auth"),
-            "cases": cases,
-            "defaults": {"headers": {}, "query": {}},
-        }, indent=2, ensure_ascii=False), encoding="utf-8")
-        # Delegate to the runner by exec'ing jxtest on the temp file.
-        import subprocess
-        cmd = [sys.executable, "bin/jxtest", "run", str(tmp),
-               "--base-url", args.base_url, "-o", "/tmp/jxtest-cleanup-results.json"]
-        if args.env:
-            cmd[4:4] = ["--env", args.env]
-        r = subprocess.run(cmd, cwd=str(Path(__file__).resolve().parents[3]), check=False)
-        sys.exit(r.returncode)
+        # Use a platform-neutral temp dir (no /tmp on Windows, and we don't want
+        # to litter the system-wide /tmp with test artifacts).
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="jxtest-cleanup-") as tmpdir:
+            tmp = Path(tmpdir) / "cleanup-cases.json"
+            out_path = Path(tmpdir) / "cleanup-results.json"
+            tmp.write_text(json.dumps({
+                "version": "1.0",
+                "baseUrl": args.base_url,
+                "auth": factory_doc.get("auth"),
+                "cases": cases,
+                "defaults": {"headers": {}, "query": {}},
+            }, indent=2, ensure_ascii=False), encoding="utf-8")
+            # Delegate to the runner by exec'ing jxtest on the temp file.
+            import subprocess
+            cmd = [sys.executable, "bin/jxtest", "run", str(tmp),
+                   "--base-url", args.base_url, "-o", str(out_path)]
+            if args.env:
+                cmd[4:4] = ["--env", args.env]
+            r = subprocess.run(cmd, cwd=str(Path(__file__).resolve().parents[3]), check=False)
+            sys.exit(r.returncode)
 
 
 if __name__ == "__main__":

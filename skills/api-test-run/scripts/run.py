@@ -557,6 +557,9 @@ def main() -> None:
     ap.add_argument("--contract", help="contract.json — classify failures into data_issue vs real_defect")
     ap.add_argument("--contract-feedback", metavar="PATH",
                     help="Write contract-feedback.json to PATH (requires --contract). Defaults to <output>-feedback.json")
+    ap.add_argument("--json", action="store_true", help="Print a stable JSON summary on stdout")
+    ap.add_argument("--explain", metavar="CASE_ID",
+                    help="Print a detailed, machine-readable explanation for one failed case")
     args = ap.parse_args()
 
     # Load config file (CLI > config > built-in defaults)
@@ -753,6 +756,41 @@ def main() -> None:
             print(f"      [{cls}/{cat}] {cid} ({ep}): {hint}", file=sys.stderr)
         if len(failures) > 10:
             print(f"      ... and {len(failures) - 10} more — see {args.output}", file=sys.stderr)
+
+    if args.explain:
+        target = next((r for r in results if r.get("caseId") == args.explain), None)
+        if not target:
+            print(f"no result found for caseId={args.explain}", file=sys.stderr)
+            sys.exit(1)
+        print(json.dumps({"caseId": target.get("caseId"),
+                          "status": target.get("status"),
+                          "failureClass": target.get("failureClass"),
+                          "diagnosis": target.get("diagnosis"),
+                          "failedAssertions": [a for a in target.get("assertions", []) if not a.get("passed")],
+                          "extracted": target.get("extracted")},
+                         indent=2, ensure_ascii=False))
+
+    if args.json:
+        summary_out = {
+            "version": "1.0",
+            "ok": failed == 0 and errors == 0,
+            "baseUrl": base_url,
+            "env": args.env,
+            "summary": out["summary"],
+            "durationMs": duration_ms,
+            "failures": [
+                {
+                    "caseId": r.get("caseId"),
+                    "endpointId": r.get("endpointId"),
+                    "category": r.get("category"),
+                    "failureClass": r.get("failureClass"),
+                    "diagnosis": r.get("diagnosis"),
+                    "failedAssertions": [a for a in r.get("assertions", []) if not a.get("passed")],
+                }
+                for r in results if r.get("status") in ("failed", "error")
+            ],
+        }
+        print(json.dumps(summary_out, indent=2, ensure_ascii=False))
 
 
 
