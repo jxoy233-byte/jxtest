@@ -378,6 +378,161 @@ def _body_or_none(endpoint: dict) -> Any:
 
 
 
+def yaml_endpoints_to_spec(yaml_path: Path) -> dict:
+    """Convert a minimal YAML endpoint description into the api-spec.json shape
+    that `_make_case` / `_fill_params` / `_fill_body` already understand.
+
+    Schema-less mode is for APIs without OpenAPI / Postman / HAR. The user
+    writes endpoints as:
+      endpoints:
+        - id: create_user
+          method: POST
+          path: /users
+          body: {username: string, email: string, password: string}
+          security: true
+        - id: get_user
+          method: GET
+          path: /users/{id}
+          path_params: {id: integer}
+      auth: {type: bearer, token: "{{TOKEN}}"}
+      baseUrl: https://api.example.com
+
+    Field types: string / integer / number / boolean / array / object.
+    Optional fields are marked with a trailing `?` (e.g. `bio: string?`) or
+    by being absent from `required`. Anything we can't infer (responses,
+    security on specific endpoints) gets sensible defaults so the generator
+    can still produce positive/negative/boundary cases.
+    """
+    try:
+        import yaml  # type: ignore
+    except ImportError:
+        sys.exit("Error: --from-yaml needs PyYAML. Install: pip install pyyaml")
+    doc = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+    if not isinstance(doc, dict) or "endpoints" not in doc:
+        sys.exit("Error: --from-yaml expects a YAML dict with an `endpoints` array")
+
+    METHODS = {"get", "post", "put", "delete", "patch", "head", "options"}
+
+    def parse_field(name: str, decl) -> dict:
+        """One `body: {username: string, age: integer}` entry → JSON schema."""
+        optional = False
+        if isinstance(decl, str):
+            t = decl.strip().rstrip("?").strip()
+            optional = decl.strip().endswith("?")
+        else:
+            t = "string"
+        if t in ("int", "integer"):
+            js = {"type": "integer"}
+        elif t in ("num", "number", "float"):
+            js = {"type": "number"}
+        elif t in ("bool", "boolean"):
+            js = {"type": "boolean"}
+        elif t in ("array", "list"):
+            js = {"type": "array", "items": {"type": "string"}}
+        elif t in ("object", "dict"):
+            js = {"type": "object"}
+        else:
+            js = {"type": "string"}
+        return js, optional
+
+    def build_schema(fields: dict) -> tuple[dict, list[str]]:
+        """Build JSON schema from a field map. Returns (schema, required)."""
+        if not isinstance(fields, dict):
+            return {}, []
+        properties: dict = {}
+        required: list[str] = []
+        for name, decl in fields.items():
+            js, optional = parse_field(name, decl)
+            properties[name] = js
+            if not optional:
+                required.append(name)
+        schema = {"type": "object", "properties": properties}
+        if required:
+            schema["required"] = required
+        return schema, required
+
+    endpoints = []
+    for ep in doc["endpoints"]:
+        if not isinstance(ep, dict):
+            continue
+        method = (ep.get("method") or "GET").upper()
+        if method.lower() not in METHODS:
+            sys.exit(f"Error: unknown method '{method}' for endpoint {ep.get('id')}")
+        path = ep.get("path", "")
+        if not path:
+            sys.exit(f"Error: endpoint {ep.get('id')} has no path")
+        parameters = []
+        # Path params from `{name}` placeholders + optional type hint
+        import re as _re
+        path_param_hints = ep.get("path_params") or {}
+        for m in _re.finditer(r"\{(\w+)\}", path):
+            pname = m.group(1)
+            pdecl = path_param_hints.get(pname, "string")
+            if isinstance(pdecl, str):
+                ptype = pdecl.strip().rstrip("?").strip()
+                if ptype in ("int", "integer"):
+                    ptype = "integer"
+                elif ptype in ("num", "number", "float"):
+                    ptype = "number"
+                elif ptype in ("bool", "boolean"):
+                    ptype = "boolean"
+                else:
+                    ptype = "string"
+            else:
+                ptype = "string"
+            parameters.append({"name": pname, "in": "path", "required": True, "type": ptype})
+        # Query params
+        for qname, qdecl in (ep.get("query") or {}).items():
+            qtype = (qdecl if isinstance(qdecl, str) else "string").strip().rstrip("?").strip()
+            if qtype in ("int", "integer"):
+                qtype = "integer"
+            elif qtype in ("num", "number", "float"):
+                qtype = "number"
+            parameters.append({"name": qname, "in": "query", "required": False, "type": qtype})
+        # Body
+        request_body = None
+        body_fields = ep.get("body")
+        if body_fields:
+            schema, required = build_schema(body_fields)
+            request_body = {"contentType": "application/json", "schema": schema, "example": None}
+        # Responses — only declared ones go in; everything else gets a default 200
+        responses = {}
+        declared_responses = ep.get("responses") or {}
+        if isinstance(declared_responses, dict):
+            for status, resp in declared_responses.items():
+                if not isinstance(resp, dict):
+                    continue
+                responses[str(status)] = {"description": resp.get("description", ""),
+                                          "schema": resp.get("schema"), "example": resp.get("example")}
+        if not responses:
+            # Sensible default: assume 200/201 on writes, 200 on reads. Generator
+            # uses _success_status() which already prefers these.
+            responses = {"200": {"description": "OK", "schema": None, "example": None}}
+        endpoints.append({
+            "id": ep.get("id") or f"{method}_{path}".replace("/", "_"),
+            "method": method,
+            "path": path,
+            "operationId": ep.get("id"),
+            "tags": ep.get("tags", []),
+            "summary": ep.get("summary", ep.get("description", "")),
+            "description": ep.get("description", ""),
+            "parameters": parameters,
+            "requestBody": request_body,
+            "responses": responses,
+            "security": [{"BearerAuth": []}] if ep.get("security") else [],
+        })
+
+    return {
+        "title": doc.get("title", "YAML Endpoints"),
+        "version": "yaml",
+        "description": doc.get("description", "Generated from YAML endpoint descriptions"),
+        "baseUrl": doc.get("baseUrl", ""),
+        "auth": doc.get("auth"),
+        "envelope": doc.get("envelope"),
+        "endpoints": endpoints,
+    }
+
+
 def _schema_example(schema: dict, prop_name: str = "") -> Any:
     """Build an example value from a schema. Falls back to faker-style values
     (via `_example_for`) so generated bodies don't end up as `{"username":
@@ -519,6 +674,11 @@ def main() -> None:
                     help="Emit structured JSON of remaining schema-less endpoints (writes to --output and exits)")
     ap.add_argument("--contract-update", metavar="FEEDBACK_JSON",
                     help="Apply a contract-feedback.json to contract.json (path given via --contract) and exit")
+    ap.add_argument("--from-yaml", metavar="YAML_FILE",
+                    help="Generate from a YAML endpoint description instead of api-spec.json. "
+                         "See SKILL.md 'Schema-less mode' for the format.")
+    ap.add_argument("--skip-doctor", action="store_true",
+                    help="Skip the post-gen doctor check (default: doctor runs inline to surface auth/envelope/variable gaps before the user runs)")
     args = ap.parse_args()
 
     # --- Mode: --contract-update (no generation) ---
@@ -541,9 +701,18 @@ def main() -> None:
         sys.exit(0)
 
     src = Path(args.input)
-    if not src.exists():
+    if not src.exists() and not args.from_yaml:
         sys.exit(f"Error: {src} not found")
-    spec = json.loads(src.read_text(encoding="utf-8"))
+
+    # --- Mode: --from-yaml (schema-less mode for APIs without OpenAPI) ---
+    if args.from_yaml:
+        yaml_path = Path(args.from_yaml)
+        if not yaml_path.exists():
+            sys.exit(f"Error: {yaml_path} not found")
+        spec = yaml_endpoints_to_spec(yaml_path)
+        print(f"Format: yaml (schema-less)  {yaml_path}", file=sys.stderr)
+    else:
+        spec = json.loads(src.read_text(encoding="utf-8"))
 
     # --- Mode: --contract-gap (structured gap report) ---
     if args.contract_gap:
@@ -687,6 +856,39 @@ def main() -> None:
         print("  Tip: if your API wraps responses (HTTP 200 + body.code), re-run with --envelope 'code:0'", file=sys.stderr)
         print("       Auto-detect: jxtest run --envelope-suggested 'code:0'", file=sys.stderr)
 
+    # --- Post-gen doctor check: surface auth/envelope/variable gaps before the
+    # user runs the suite, so they don't burn 200+ requests just to discover
+    # their TOKEN env is missing. Cheap (no network), inline. ---
+    if not args.skip_doctor:
+        try:
+            from doctor import build_report
+            report = build_report(src, Path(args.output), None)
+            errors = [i for i in report["issues"] if i["severity"] == "error"]
+            warnings = [i for i in report["issues"] if i["severity"] == "warning"]
+            if errors or warnings:
+                print("", file=sys.stderr)
+                print(f"[doctor] post-gen: {len(errors)} errors, "
+                      f"{len(warnings)} warnings (use --skip-doctor to bypass):",
+                      file=sys.stderr)
+                for issue in errors[:5]:
+                    print(f"  ✗ [{issue['code']}] {issue['message']}",
+                          file=sys.stderr)
+                    if issue.get("actions"):
+                        print(f"      → {issue['actions'][0]['command']}",
+                              file=sys.stderr)
+                for issue in warnings[:5]:
+                    print(f"  ⚠ [{issue['code']}] {issue['message']}",
+                          file=sys.stderr)
+                    if issue.get("actions"):
+                        print(f"      → {issue['actions'][0]['command']}",
+                              file=sys.stderr)
+                if len(errors) > 5 or len(warnings) > 5:
+                    print(f"      ... and more — see `jxtest doctor api-spec.json --cases {args.output}`",
+                          file=sys.stderr)
+                if errors:
+                    sys.exit(2)
+        except ImportError:
+            pass  # doctor not importable; skip silently
 
 
 if __name__ == "__main__":

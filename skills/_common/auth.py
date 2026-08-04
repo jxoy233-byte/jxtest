@@ -44,6 +44,27 @@ def fetch_oauth2_token(auth: dict, scopes: list[dict]) -> str:
         sys.exit(f"Error: OAuth2 token fetch failed: {e}")
 
 
+def select_tenant(auth: dict, tenant_name: str | None) -> dict:
+    """If `auth` declares multiple tenants, return the one matching `tenant_name`.
+    Otherwise return `auth` unchanged. A multi-tenant API serves different
+    data per tenant, so a test that should hit tenant B's data needs that
+    tenant's credentials — not the default login. (Experience report 2026-08-04:
+    'single-tenant assumption'.)
+    """
+    tenants = auth.get("tenants")
+    if not isinstance(tenants, list) or not tenants:
+        return auth
+    if tenant_name is None:
+        # Default tenant = first one, but warn if multiple so the user knows
+        # they're running only one slice of the matrix.
+        return {**auth, **tenants[0]}
+    for t in tenants:
+        if t.get("name") == tenant_name:
+            return {**auth, **t, "name": t.get("name")}
+    # Unknown tenant name — fall back to default but surface in headers() error.
+    return {**auth, **tenants[0]}
+
+
 def fetch_login_token(auth: dict, base_url: str) -> tuple[str, str]:
     """POST credentials to a JSON login endpoint. Returns (token, error).
 
@@ -196,7 +217,7 @@ def resolve_auth(auth: dict | None, scopes: list[dict], base_url: str = "") -> A
     return AuthProvider(auth, scopes, base_url)
 
 
-def clone_auth(provider: AuthProvider) -> AuthProvider:
+def clone_auth(provider: AuthProvider, tenant: str | None = None) -> AuthProvider:
     """Deep-clone an AuthProvider so parallel workers don't share token state.
 
     Shared `_headers` is the silent race hazard: one worker's refresh (after a
@@ -204,10 +225,16 @@ def clone_auth(provider: AuthProvider) -> AuthProvider:
     independent provider with the same config but its own lock + cache.
     Cheap — no network I/O. The clone is unbuilt (no token yet); first call
     to `.headers()` will trigger the actual login on that worker.
+
+    `tenant`: optional tenant name — only matters when the auth block declares
+    a `tenants: [{...}, {...}]` array. Each tenant gets its own credentials
+    and login flow, so a worker handling a case with `meta.tenant: "B"` needs
+    tenant B's login (not the default's). Without tenants, this is ignored.
     """
     new = AuthProvider.__new__(AuthProvider)
     new.auth = provider.auth  # already resolved, safe to share
     new.base_url = provider.base_url
     new._lock = threading.Lock()
     new._headers = None  # independent cache
+    new._tenant = tenant  # informational only; build uses self.auth
     return new

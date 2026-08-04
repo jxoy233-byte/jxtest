@@ -311,6 +311,18 @@ def run_one(case: dict, base_url: str, auth, timeout: float, scopes: list[dict],
     # or start the request so a missing override doesn't blow up later.
     case_envelope = resolve_envelope_for_case(envelope_doc, case.get("endpointId"), envelope)
 
+    # Tenant switching: when the auth block declares multiple tenants, each
+    # case can opt into a different tenant via `meta.tenant`. The shared auth
+    # object is rebuilt for this case so it logs in as the right tenant; the
+    # clone also avoids poisoning the default cache with the wrong tenant's
+    # token.
+    case_tenant = (case.get("meta") or {}).get("tenant")
+    if case_tenant and auth.auth.get("tenants"):
+        from _common.auth import select_tenant, clone_auth
+        auth = clone_auth(auth)
+        auth.auth = select_tenant(auth.auth, case_tenant)
+        auth._headers = None  # force re-login as the new tenant
+
     # Isolated endpoint marker: this case invalidates the auth token (logout,
     # password reset, account delete). Snapshot the current auth state, get
     # a fresh token, run, then restore the original. Without this, a single
@@ -426,13 +438,16 @@ def _run_one_inner(case, resolved_case, auth_headers, base_url, auth, timeout, s
                     # top-level shape so the user can spot envelope-wrapped
                     # responses where their path was missing `data.` prefix
                     # (the scenario/extract-tooling bug report 2026-08-03).
-                    shape = (list(body_data.keys())[:6]
-                             if isinstance(body_data, dict)
-                             else type(body_data).__name__)
-                    print(f"[extract] case {case['id']}: var '{name}' not found via "
-                          f"path '{path}' — body top-level: {shape}. "
-                          f"Downstream cases may fail with unresolved variables.",
-                          file=sys.stderr)
+                    # --quiet hides this — too noisy when AI is parsing 200+
+                    # successful cases; the full extract map is in the JSON.
+                    if not args.quiet:
+                        shape = (list(body_data.keys())[:6]
+                                 if isinstance(body_data, dict)
+                                 else type(body_data).__name__)
+                        print(f"[extract] case {case['id']}: var '{name}' not found via "
+                              f"path '{path}' — body top-level: {shape}. "
+                              f"Downstream cases may fail with unresolved variables.",
+                              file=sys.stderr)
                 extracted[name] = val
         except json.JSONDecodeError:
             pass
@@ -570,8 +585,12 @@ def main() -> None:
     ap.add_argument("--contract-feedback", metavar="PATH",
                     help="Write contract-feedback.json to PATH (requires --contract). Defaults to <output>-feedback.json")
     ap.add_argument("--json", action="store_true", help="Print a stable JSON summary on stdout")
+    ap.add_argument("--quiet", action="store_true",
+                    help="Hide successful cases from output — only show failures + summary. Saves tokens when AI is parsing results.")
     ap.add_argument("--explain", metavar="CASE_ID",
                     help="Print a detailed, machine-readable explanation for one failed case")
+    ap.add_argument("--skip-preflight", action="store_true",
+                    help="Skip the doctor preflight (default: doctor runs in-line; failures abort the run with actionable diagnostics)")
     args = ap.parse_args()
 
     # Load config file (CLI > config > built-in defaults)
@@ -586,6 +605,41 @@ def main() -> None:
     if not src.exists():
         sys.exit(f"Error: {src} not found")
     data = json.loads(src.read_text(encoding="utf-8"))
+
+    # Preflight: run doctor in-process to catch missing vars / envelope / auth
+    # issues BEFORE we burn a round of HTTP requests. Saves AI tokens on the
+    # common "I forgot to set TOKEN" / "envelope misconfigured" / "path param
+    # missing" mistakes that otherwise show up as 401/422 noise in test-results.
+    if not args.skip_preflight and "--explain" not in sys.argv:
+        try:
+            from doctor import build_report
+            spec_path = Path(args.spec) if args.spec else Path("api-spec.json")
+            doctor_report = build_report(spec_path, src, args.env)
+            errors = [i for i in doctor_report["issues"] if i["severity"] == "error"]
+            warnings = [i for i in doctor_report["issues"] if i["severity"] == "warning"]
+            if errors or warnings:
+                print(f"[preflight] doctor found {len(errors)} errors, "
+                      f"{len(warnings)} warnings "
+                      f"(use --skip-preflight to bypass):",
+                      file=sys.stderr)
+                for issue in errors[:5]:
+                    print(f"  ✗ [{issue['code']}] {issue['message']}",
+                          file=sys.stderr)
+                    if issue.get("actions"):
+                        print(f"      → {issue['actions'][0]['command']}",
+                              file=sys.stderr)
+                for issue in warnings[:5]:
+                    print(f"  ⚠ [{issue['code']}] {issue['message']}",
+                          file=sys.stderr)
+                if errors:
+                    # Hard block: errors will cause the entire suite to fail
+                    # with the same root cause — better to surface them now
+                    # than burn the request round.
+                    sys.exit(2)
+        except ImportError:
+            # doctor.py not on sys.path (e.g. direct script invocation outside
+            # bin/jxtest). Skip preflight silently — the script can still run.
+            pass
 
     # Scopes: case-level (highest) → env → global → shell (lowest)
     scopes = load_env(args.env, extra_scope=data)
@@ -673,7 +727,7 @@ def main() -> None:
     # in phase 0 and run together.
     phases = _build_phases(cases)
     parallel = args.parallel
-    if len(phases) > 1:
+    if len(phases) > 1 and not args.quiet:
         print(f"Extract topology: {len(phases)} phase(s); independent cases within each phase "
               f"run in parallel (workers={parallel})", file=sys.stderr)
 
@@ -765,11 +819,18 @@ def main() -> None:
                   f"{fb['real_defects']} real_defects  {feedback_path}", file=sys.stderr)
 
     s = out["summary"]
-    print(f"OK  {s['total']} cases  {s['passed']} passed  {s['failed']} failed  {s['errors']} errors  {args.output}", file=sys.stderr)
-    print(f"    duration: {duration_ms}ms  env: {args.env or '-'}", file=sys.stderr)
-    if server_errors:
+    if args.quiet:
+        # Compact one-liner for AI token economy. Detail is in test-results.json.
+        marker = "✓" if failed == 0 and errors == 0 else "✗"
+        print(f"{marker} {s['passed']}/{s['total']} passed  "
+              f"{s['failed']} failed  {s['errors']} errors  {args.output}",
+              file=sys.stderr)
+    else:
+        print(f"OK  {s['total']} cases  {s['passed']} passed  {s['failed']} failed  {s['errors']} errors  {args.output}", file=sys.stderr)
+        print(f"    duration: {duration_ms}ms  env: {args.env or '-'}", file=sys.stderr)
+    if server_errors and not args.quiet:
         print(f"    server errors: {server_errors} (5xx or envelope code in the 5xx range)", file=sys.stderr)
-    if args.junit:
+    if args.junit and not args.quiet:
         print(f"    junit: {args.junit_output}", file=sys.stderr)
 
     # Top-N failures: a 1-line summary is easy to miss when there are dozens of
