@@ -16,7 +16,7 @@ from pathlib import Path
 # skills) — without `bin/jxtest` adding `skills/` to sys.path, `from _common`
 # would fail with ModuleNotFoundError.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from _common import (build_url, execute, resolve_auth, load_env,  # noqa: E402
+from _common import (build_url, execute, resolve_auth, load_env, resolve_base_url,  # noqa: E402
                      load_envelope, parse_envelope_arg, classify, describe,
                      detect_envelope)
 
@@ -423,6 +423,7 @@ def build_findings(results: list[dict]) -> list[dict]:
                         "securityType": "sensitive_data",
                         "severity": severity,
                         "vulnerable": True,
+                        "category": "vulnerability",
                         "evidence": f"Response contains {kind} pattern",
                         "description": ATTACK_DESCRIPTIONS["sensitive_data"],
                         "remediation": fix_hint,
@@ -441,6 +442,13 @@ def build_findings(results: list[dict]) -> list[dict]:
             evidence = f"Got {observed}, expected the request to be refused"
             outcome = r.get("outcome")
             http_status = r.get("httpStatus")
+            # `category` records *why* a finding is or isn't a vulnerability, so
+            # the summary can bucket honestly. Deriving the buckets downstream
+            # from `not vulnerable` lumped real 5xx together with not-found
+            # refusals and no-evidence noise, and reported the total as
+            # "server errors" — a report claiming 43 server errors when the
+            # server returned zero 5xx (experience report 2026-08-04).
+            category = "vulnerability"
             # 404 on a probe = server didn't expose resource existence, which is
             # actually safer than 403 (returning 403 confirms the resource
             # exists; 404 reveals nothing). Demote to info so the report doesn't
@@ -450,10 +458,12 @@ def build_findings(results: list[dict]) -> list[dict]:
             if http_status == 404 and sec_type in ("idor", "ssrf", "path_traversal", "broken_auth_empty",
                                                    "broken_auth_garbage", "broken_auth_expired"):
                 severity = "info"
+                category = "refused_not_found"
                 evidence = (f"Got {observed} — server refused with Not Found, which doesn't "
                             f"expose resource existence (safer than 403). Not a vulnerability.")
             if outcome == "server_error":
                 severity = "medium" if severity in ("critical", "high") else severity
+                category = "server_error"
                 evidence = (f"Got {observed} — server error, likely a bug "
                             f"(missing input validation), not a confirmed vulnerability")
             elif outcome == "unknown":
@@ -473,6 +483,8 @@ def build_findings(results: list[dict]) -> list[dict]:
             # they're visible but don't pollute the high-severity tally.
             if not vulnerable and outcome not in ("server_error", "unknown"):
                 severity = "info"
+                if category == "vulnerability":
+                    category = "no_evidence"
             if body_excerpt:
                 evidence = f"{evidence}  body: {body_excerpt}"
             fix_hint, fix_example = ATTACK_FIXES.get(sec_type, ("", ""))
@@ -482,6 +494,7 @@ def build_findings(results: list[dict]) -> list[dict]:
                 "securityType": sec_type,
                 "severity": severity,
                 "vulnerable": vulnerable,
+                "category": category,
                 "evidence": evidence,
                 "description": ATTACK_DESCRIPTIONS.get(sec_type, sec_type),
                 "remediation": fix_hint,
@@ -525,9 +538,12 @@ def main() -> None:
         sys.exit(f"Error: {spec_path} not found")
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
 
-    base_url = args.base_url or spec.get("baseUrl", "")
+    base_url, base_url_note = resolve_base_url(args.base_url, spec, args.env)
     if not base_url:
-        sys.exit("Error: base URL not set")
+        sys.exit("Error: base URL not set (use --base-url, set baseUrl in "
+                 "env/<name>.json, or export API_BASE_URL)")
+    if base_url_note:
+        print(f"Note: {base_url_note}", file=sys.stderr)
 
     # Generate security test cases
     include = set(args.include.split(","))
@@ -601,7 +617,13 @@ def main() -> None:
 
     findings = build_findings(results)
     confirmed = [f for f in findings if f["vulnerable"]]
-    server_errors = [f for f in findings if not f["vulnerable"]]
+    # Bucket by *why* a probe was cleared, not by "not vulnerable". Real 5xx,
+    # not-found refusals and no-evidence noise are three different signals and
+    # collapsing them under "server_errors" made the report claim server
+    # failures that never happened.
+    server_errors = [f for f in findings if f.get("category") == "server_error"]
+    refused_not_found = [f for f in findings if f.get("category") == "refused_not_found"]
+    no_evidence = [f for f in findings if f.get("category") == "no_evidence"]
     by_severity: dict[str, int] = {}
     for f in findings:
         by_severity[f["severity"]] = by_severity.get(f["severity"], 0) + 1
@@ -663,6 +685,8 @@ def main() -> None:
             "total_probes": len(cases),
             "vulnerabilities": len(confirmed),
             "server_errors": len(server_errors),
+            "refused_not_found": len(refused_not_found),
+            "no_evidence": len(no_evidence),
             "config_findings": len(config_findings),
             "by_severity": by_severity,
             "by_attack": {t: sum(1 for f in findings if f["securityType"] == t)
@@ -678,8 +702,15 @@ def main() -> None:
     s = out["summary"]
     print(f"OK  {s['total_probes']} probes  {s['vulnerabilities']} vulnerabilities  {args.output}", file=sys.stderr)
     if s["server_errors"]:
-        print(f"    {s['server_errors']} probes hit a server error (reported separately — "
-              f"likely missing input validation, not an exploit)", file=sys.stderr)
+        print(f"    {s['server_errors']} probes hit a real server error (5xx or 5xx-range "
+              f"envelope code — likely missing input validation, not an exploit)", file=sys.stderr)
+    if s["refused_not_found"]:
+        print(f"    {s['refused_not_found']} probes were refused with 404 (safe — the server "
+              f"revealed nothing about whether the resource exists)", file=sys.stderr)
+    if s["no_evidence"]:
+        print(f"    {s['no_evidence']} probes returned data but showed no exploit evidence "
+              f"(no reflected payload, no leaked field) — review only if the endpoint "
+              f"should have rejected the request", file=sys.stderr)
     for sev in ("critical", "high", "medium", "low"):
         n = by_severity.get(sev, 0)
         if n:

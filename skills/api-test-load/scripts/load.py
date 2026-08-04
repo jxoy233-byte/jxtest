@@ -14,7 +14,7 @@ from pathlib import Path
 # skills) — without `bin/jxtest` adding `skills/` to sys.path, `from _common`
 # would fail with ModuleNotFoundError.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from _common import build_url, execute, resolve_auth, load_env, apply_defaults  # noqa: E402
+from _common import build_url, execute, resolve_auth, load_env, resolve_base_url, apply_defaults  # noqa: E402
 
 
 def parse_duration(s: str) -> float:
@@ -330,7 +330,9 @@ def main() -> None:
     ap.add_argument("cases", help="test-cases.json")
     ap.add_argument("--config", help="load.config.json with scenarios")
     ap.add_argument("-o", "--output", default="test-load-results.json")
-    ap.add_argument("--base-url", default=os.environ.get("API_BASE_URL", ""))
+    ap.add_argument("--base-url", default="",
+                    help="Override the API base URL (else env/<name>.json, the cases file, "
+                         "global.json, then $API_BASE_URL)")
     ap.add_argument("--env", help="Environment name")
     ap.add_argument("--vus", type=int, default=10, help="Virtual users (default scenario)")
     ap.add_argument("--duration", default="30s", help="Duration (default scenario)")
@@ -351,9 +353,12 @@ def main() -> None:
     if not cases:
         sys.exit("Error: no cases in test-cases.json")
 
-    base_url = args.base_url or data.get("baseUrl", "")
+    base_url, base_url_note = resolve_base_url(args.base_url, data, args.env)
     if not base_url:
-        sys.exit("Error: base URL not set")
+        sys.exit("Error: base URL not set (use --base-url, set baseUrl in "
+                 "env/<name>.json, or export API_BASE_URL)")
+    if base_url_note:
+        print(f"Note: {base_url_note}", file=sys.stderr)
 
     scopes = load_env(args.env)
     auth_headers = resolve_auth(data.get("auth"), scopes, base_url).headers()

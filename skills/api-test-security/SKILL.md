@@ -57,6 +57,8 @@ jxtest security api-spec.json --rules examples/security-rules.json
     "total_probes": 47,
     "vulnerabilities": 3,
     "server_errors": 2,
+    "refused_not_found": 12,
+    "no_evidence": 9,
     "config_findings": 1,
     "by_severity": {"critical": 1, "high": 2}
   },
@@ -66,6 +68,7 @@ jxtest security api-spec.json --rules examples/security-rules.json
       "securityType": "idor",
       "severity": "critical",
       "vulnerable": true,
+      "category": "vulnerability",
       "evidence": "Got HTTP 200 code=0 (ok), expected the request to be refused",
       "remediation": "Enforce per-request ownership: pull user_id from the JWT/session, then compare against the resource's owner_id before returning data.",
       "fixExample": "function assertOwns(req, resource) { if (resource.owner_id !== req.user.id) return res.status(403).send(); }"
@@ -123,7 +126,19 @@ Custom rules participate in the same ranking pipeline — a failed custom probe 
 - `1` — high-severity finding (in `by_severity`)
 - `2` — critical-severity finding
 
-Server errors **do not** affect the exit code. They show up in `summary.server_errors` for triage but never block a CI run by themselves.
+Only `vulnerabilities` affect the exit code. Every finding carries a `category`
+explaining why it was or wasn't counted:
+
+| `category` | Meaning |
+|---|---|
+| `vulnerability` | Concrete evidence — reflected payload or a leaked privileged field. Counted in `vulnerabilities`. |
+| `server_error` | A real 5xx (or 5xx-range envelope code). Usually missing input validation, not an exploit. |
+| `refused_not_found` | The server answered 404. That's a safe refusal — unlike 403 it doesn't confirm the resource exists. |
+| `no_evidence` | The probe got data back but nothing indicates it was exploitable. Review only if the endpoint should have rejected the request. |
+
+These are counted separately on purpose. Reporting them all as "server errors"
+made runs claim dozens of server failures against a backend that returned zero
+5xx responses.
 
 ## Auth handling
 

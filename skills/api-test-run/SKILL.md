@@ -18,8 +18,8 @@ Execute functional test cases against a live API. **The workhorse skill for AI-d
 | Source | Required | Notes |
 |--------|----------|-------|
 | `test-cases.json` | ✅ | from `api-test-gen` or hand-written |
-| `--env <name>` | – | loads `env/<name>.json` + `global.json` |
-| `--base-url <url>` | – | overrides baseUrl in test-cases.json |
+| `--env <name>` | – | loads `env/<name>.json` + `global.json` (including its `baseUrl`) |
+| `--base-url <url>` | – | overrides every other base URL source (see below) |
 | `--pre-script <file.py>` | – | Python `pre(ctx)` runs before each request |
 | `--config <file.json>` | – | `jxtest.config.json` for project defaults (CLI > file > built-in) |
 | `--filter <categories>` | – | comma-separated (e.g. `positive,security`); overrides `--profile` |
@@ -31,6 +31,21 @@ Execute functional test cases against a live API. **The workhorse skill for AI-d
 | `--contract-feedback <file>` | – | write the classification report (defaults to `<output>-feedback.json`) |
 | `--junit` | – | also write `test-results.xml` |
 | `--parallel N` | – | parallel workers (auto-topological for `extract` chains) |
+
+### Where the base URL comes from
+
+Resolved in this order, first hit wins — identical in `run`, `load` and `security`:
+
+1. `--base-url` on the command line
+2. `baseUrl` in `env/<name>.json` (when `--env <name>` is given)
+3. `baseUrl` in `test-cases.json` / `api-spec.json`
+4. `baseUrl` in `global.json`
+5. `$API_BASE_URL`
+
+Naming an environment is deliberate, so it outranks the `baseUrl` that `jxtest gen`
+baked into the cases file. Whenever a lower-priority source held a *different*
+URL, the run prints a `Note:` naming both — pointing a suite at dev while you
+believe it hit prod is the expensive mistake here, and it should never be silent.
 
 ## Output
 

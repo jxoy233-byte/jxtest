@@ -119,6 +119,17 @@ def find_vars(obj) -> set:
     return found
 
 
+def _read_json(path: Path) -> dict:
+    """Read a JSON config file, or {} if absent/malformed."""
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def load_env(name: str | None, extra_scope: dict | None = None) -> list[dict]:
     """Load scopes in priority order: extra_scope → env/<name>.json → global.json → shell.
 
@@ -135,3 +146,51 @@ def load_env(name: str | None, extra_scope: dict | None = None) -> list[dict]:
         scopes.append(json.loads(Path("global.json").read_text(encoding="utf-8")))
     scopes.append(dict(os.environ))
     return scopes
+
+
+def resolve_base_url(explicit: str, doc: dict | None, env_name: str | None = None) -> tuple[str, str]:
+    """Resolve the API base URL from every source. Returns (base_url, note).
+
+    Precedence, highest first:
+      1. `--base-url` on the command line — an explicit override always wins.
+      2. `env/<name>.json` when `--env <name>` is given. An environment file is
+         the natural home for a per-environment host, and naming an environment
+         is a deliberate act; it must beat a value baked into a generated file.
+      3. `baseUrl` in the doc (test-cases.json / api-spec.json), usually
+         inherited from whatever spec `jxtest gen` was pointed at.
+      4. `global.json`.
+      5. `API_BASE_URL` in the shell.
+
+    `note` is non-empty when a lower-priority source held a *different* URL that
+    got shadowed. Quietly testing against the wrong host is the expensive
+    failure here — a run that looks green against dev while the user believes
+    it hit prod — so callers should print the note rather than swallow it.
+    """
+    env_doc = _read_json(Path("env") / f"{env_name}.json") if env_name else {}
+    global_doc = _read_json(Path("global.json"))
+    doc = doc if isinstance(doc, dict) else {}
+
+    candidates = [
+        (explicit, "--base-url"),
+        (env_doc.get("baseUrl"), f"env/{env_name}.json"),
+        (doc.get("baseUrl"), "the cases/spec file"),
+        (global_doc.get("baseUrl"), "global.json"),
+        (os.environ.get("API_BASE_URL"), "API_BASE_URL"),
+    ]
+    chosen, source = "", ""
+    for value, origin in candidates:
+        if isinstance(value, str) and value.strip():
+            chosen, source = value.strip(), origin
+            break
+    if not chosen:
+        return "", ""
+
+    shadowed = [
+        f"{origin} ({value.strip()})"
+        for value, origin in candidates
+        if isinstance(value, str) and value.strip() and value.strip() != chosen and origin != source
+    ]
+    note = ""
+    if shadowed:
+        note = f"base URL {chosen} (from {source}); ignoring " + ", ".join(shadowed)
+    return chosen, note

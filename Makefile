@@ -15,11 +15,12 @@ OUT_SECURITY = test-security-results.json
 OUT_DIFF     = migration.md
 OUT_COVERAGE = coverage.md
 
-.PHONY: help install env-create schema gen validate run load heal report doc mock security diff coverage ci all clean
+.PHONY: help install test env-create schema gen validate run load heal report doc mock security diff coverage ci all clean
 
 help:
 	@echo "Targets:"
-	@echo "  make install                       symlink bin/jxtest into ~/.local/bin"
+	@echo "  make install                       symlink bin/jxtest into ~/.local/bin (POSIX only)"
+	@echo "  make test                          run the test suite"
 	@echo "  make env-create NAME=dev URL=...   create env file"
 	@echo "  make schema SRC=<file]             parse API spec"
 	@echo "  make gen                           generate test cases"
@@ -44,6 +45,11 @@ install:
 	@ln -sf "$(abspath $(BIN))" ~/.local/bin/jxtest
 	@echo "OK  installed: ~/.local/bin/jxtest -> $(BIN)"
 	@echo "    ensure ~/.local/bin is in PATH"
+	@echo "    (this target is POSIX-only; on Windows run: python bin\\jxtest install)"
+
+test:
+	@for t in tests/test_*.py; do echo "== $$t"; python3 "$$t" || exit 1; done
+	@echo "OK  all tests passed"
 
 env-create:
 	@test -n "$(NAME)" || (echo "ERROR: NAME=<env-name> required" && exit 1)

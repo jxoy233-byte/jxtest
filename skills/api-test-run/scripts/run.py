@@ -16,7 +16,7 @@ from xml.sax.saxutils import escape, quoteattr
 # skills) — without `bin/jxtest` adding `skills/` to sys.path, `from _common`
 # would fail with ModuleNotFoundError.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from _common import (build_url, execute, resolve_auth, deep_resolve, load_env, apply_defaults,  # noqa: E402
+from _common import (build_url, execute, resolve_auth, deep_resolve, load_env, resolve_base_url, apply_defaults,  # noqa: E402
                      find_unresolved, find_vars, get_json_path, load_envelope, parse_envelope_arg,
                      classify, describe, business_code, detect_envelope,
                      resolve_envelope_for_case)
@@ -567,7 +567,9 @@ def main() -> None:
     ap.add_argument("input", help="test-cases.json")
     ap.add_argument("-o", "--output", default="test-results.json")
     ap.add_argument("--env", help="Environment name to load (env/<name>.json)")
-    ap.add_argument("--base-url", default=os.environ.get("API_BASE_URL", ""))
+    ap.add_argument("--base-url", default="",
+                    help="Override the API base URL (else env/<name>.json, the cases file, "
+                         "global.json, then $API_BASE_URL)")
     ap.add_argument("--parallel", "-p", type=int, default=4)
     ap.add_argument("--timeout", type=float, default=10.0)
     ap.add_argument("--filter", help="Run only these categories (comma-separated)")
@@ -643,9 +645,12 @@ def main() -> None:
 
     # Scopes: case-level (highest) → env → global → shell (lowest)
     scopes = load_env(args.env, extra_scope=data)
-    base_url = args.base_url or data.get("baseUrl", "")
+    base_url, base_url_note = resolve_base_url(args.base_url, data, args.env)
     if not base_url:
-        sys.exit("Error: base URL not set (use --base-url or API_BASE_URL)")
+        sys.exit("Error: base URL not set (use --base-url, set baseUrl in "
+                 "env/<name>.json, or export API_BASE_URL)")
+    if base_url_note and not args.quiet:
+        print(f"Note: {base_url_note}", file=sys.stderr)
 
     auth = resolve_auth(data.get("auth"), scopes, base_url)
     auth_error = auth.headers().get("error")

@@ -26,33 +26,56 @@ ln -sf "$(pwd)/bin/jxtest" ~/.local/bin/jxtest
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
+### Repairing the install
+
+`jxtest install` is idempotent — run it any time to relink the CLI and the
+Claude Code skills. It's the fix after moving or renaming the repo, which
+leaves `~/.local/bin/jxtest` pointing at a path that no longer exists:
+
+```bash
+python3 bin/jxtest install --dry-run   # show what would change
+python3 bin/jxtest install             # relink CLI + 17 skills
+```
+
+Call it through `python3 bin/jxtest` rather than bare `jxtest` — if the link is
+already broken, `jxtest` won't resolve.
+
 ### Windows
 
 ```powershell
 git clone https://github.com/your-org/jxtest.git
 cd jxtest
 pip install pyyaml
+python bin\jxtest install
 ```
 
-Then pick one of these to invoke jxtest:
+`install` detects Windows and avoids symlinks entirely, so it needs no
+administrator rights:
+
+- **CLI** → writes a `jxtest.cmd` shim into Python's `Scripts\` directory
+  (already on PATH if Python was installed with "Add Python to PATH"). The
+  shim pins the interpreter that ran the installer, so a second Python on the
+  machine without `pyyaml` can't shadow it.
+- **Skills** → linked with *directory junctions* rather than symlinks.
+  Symlinks require Developer Mode or an elevated prompt; junctions require
+  neither and behave identically for reads.
+
+Check first with `python bin\jxtest install --dry-run`. If PATH needs fixing,
+the installer prints the exact `setx` / `$env:Path` command.
+
+Prefer not to install at all? Every command works when invoked directly:
 
 ```powershell
-# Option A: call python directly (no setup needed)
 python bin\jxtest schema openapi.yaml
-
-# Option B: register the CLI in PATH (PowerShell, current user only)
-$env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
-# Copy or symlink bin\jxtest into a directory on PATH (e.g. %LOCALAPPDATA%\Programs\Python\Python311\Scripts\)
-copy bin\jxtest %LOCALAPPDATA%\Programs\Python\Python311\Scripts\jxtest.cmd
 ```
 
-`make` isn't natively available on Windows — use the Python invocation above, or install [Chocolatey](https://chocolatey.org/install) / use WSL.
+`make` isn't natively available on Windows — use the Python invocation above, or install [Chocolatey](https://chocolatey.org/install) / use WSL. The `make install` target is POSIX-only (`ln -s`); `python bin\jxtest install` is its cross-platform equivalent.
 
 ### Verify
 
 ```bash
 jxtest --help       # shows all 17 commands
-jxtest --version    # 1.3
+jxtest --version    # 1.7
 ```
 
 ## Quick start
