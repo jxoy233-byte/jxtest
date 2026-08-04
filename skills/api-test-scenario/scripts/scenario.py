@@ -161,6 +161,13 @@ def _make_case(step: str, method: str, path: str, *, body=None, extract=None,
 def build_scenario(args) -> list[dict]:
     cases: list[dict] = []
 
+    # Extract path convention: when `--envelope` is set, the response is wrapped
+    # in `{code, data, message}`, so paths start with `data.`. The runner's
+    # `get_json_path` accepts both `data.x` and `$.data.x` styles, so we use
+    # the bare form for historical compatibility (matches Postman variable
+    # conventions). If you write a custom scenario-file, follow the same
+    # convention — or pass the absolute `$.data.x` form and the runner will
+    # strip the leading `$` for you.
     # 1) Login
     login_body = json.loads(args.login_body) if args.login_body else {"username": "{{USER}}", "password": "{{PASS}}"}
     cases.append(_make_case(

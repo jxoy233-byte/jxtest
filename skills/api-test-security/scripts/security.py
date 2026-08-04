@@ -139,7 +139,15 @@ ATTACK_FIXES = {
 
 
 def gen_idor(endpoint: dict) -> list[dict]:
-    """For path-param endpoints, try other users' IDs."""
+    """For path-param endpoints, try other users' IDs.
+
+    The previous version marked any "200 + business data" response as
+    vulnerable. That was wrong: returning 200 + data is the *legitimate*
+    behavior when the endpoint fetches its own resource. We now add
+    `no_reflected_payload` so the assertion passes unless the response body
+    actually contains the probe (id="0") — which would indicate the server
+    blindly returned whatever id was sent without authorization checks.
+    """
     if endpoint["method"] not in ("GET", "PUT", "PATCH", "DELETE"):
         return []
     path_params = [p for p in endpoint.get("parameters", []) if p.get("in") == "path"]
@@ -148,7 +156,9 @@ def gen_idor(endpoint: dict) -> list[dict]:
     probe = "0"  # one probe per endpoint is enough to detect IDOR
     p = path_params[0]
     path = endpoint["path"].replace("{" + p["name"] + "}", probe)
-    return [_case(endpoint, path, "idor", "IDOR probe", {"type": "safe_response"})]
+    return [_case(endpoint, path, "idor", "IDOR probe",
+                  {"type": "safe_response"},
+                  extra_assertion={"type": "no_reflected_payload", "payload": probe})]
 
 
 def gen_broken_auth(endpoint: dict) -> list[dict]:
@@ -382,7 +392,20 @@ def _run_assertion(a: dict, resp: dict, envelope: dict | None = None) -> dict:
 
 
 def build_findings(results: list[dict]) -> list[dict]:
-    """Convert raw test results into severity-ranked findings."""
+    """Convert raw test results into severity-ranked findings.
+
+    Vulnerability verdict logic (refined after ERP 实战 v2 report 2026-08-03:
+    "44 high findings, 43 false positives"):
+      - bare `safe_response` failed (got 200 + business data) is NOT enough
+        evidence on its own. Endpoints that ignore a probe payload and return
+        their own data are behaving legitimately for that probe.
+      - `no_reflected_payload` failed → the probe payload literally appeared
+        in the response body → that IS evidence of exploitability.
+      - `body_not_contains` failed → a privileged field showed up in the
+        response → confirmed mass assignment.
+      - Sensitive data pattern regex hit on a passing probe → real PII leak.
+      - 5xx / unknown outcome → server_error finding (separate category).
+    """
     findings = []
     for r in results:
         # Sensitive data scan: post-process body
@@ -404,26 +427,36 @@ def build_findings(results: list[dict]) -> list[dict]:
                     break
             continue
 
-        # Standard: failed = vulnerable, passed = safe
+        # Standard: failed = probe did not achieve its refusal goal. Decide
+        # whether that's "vulnerable" or just "noisy" based on concrete evidence.
         if r["status"] == "failed":
             sec_type = r["securityType"]
             severity = SEVERITY.get(sec_type, "medium")
             observed = r.get("observed") or f"HTTP {r.get('httpStatus')}"
             body_excerpt = (r.get("body") or "")[:160]
             evidence = f"Got {observed}, expected the request to be refused"
-            # A 5xx means the probe crashed the handler. That is a defect worth
-            # fixing, but it is not evidence that the attack succeeded — reporting
-            # it as critical drowns the real findings.
             outcome = r.get("outcome")
             if outcome == "server_error":
                 severity = "medium" if severity in ("critical", "high") else severity
                 evidence = (f"Got {observed} — server error, likely a bug "
                             f"(missing input validation), not a confirmed vulnerability")
             elif outcome == "unknown":
-                # Network error / unable to classify — the probe never reached
-                # a refusal or success verdict, so the result is untrustworthy.
-                # Suppress the finding rather than reporting a false positive.
                 continue
+            # Concrete-evidence check: if the only failing assertion is
+            # `safe_response` (i.e. "server didn't reject"), demote unless a
+            # payload-reflection assertion also failed. This is the fix for
+            # the "44 high → 43 false positive" experience report.
+            assertions = r.get("assertions") or []
+            concrete_failure = any(
+                a.get("type") in ("no_reflected_payload", "body_not_contains")
+                and not a.get("passed")
+                for a in assertions
+            )
+            vulnerable = outcome not in ("server_error", "unknown") and concrete_failure
+            # Demote "noisy" probes (no concrete evidence) to info-level so
+            # they're visible but don't pollute the high-severity tally.
+            if not vulnerable and outcome not in ("server_error", "unknown"):
+                severity = "info"
             if body_excerpt:
                 evidence = f"{evidence}  body: {body_excerpt}"
             fix_hint, fix_example = ATTACK_FIXES.get(sec_type, ("", ""))
@@ -432,7 +465,7 @@ def build_findings(results: list[dict]) -> list[dict]:
                 "caseId": r["caseId"],
                 "securityType": sec_type,
                 "severity": severity,
-                "vulnerable": outcome not in ("server_error", "unknown"),
+                "vulnerable": vulnerable,
                 "evidence": evidence,
                 "description": ATTACK_DESCRIPTIONS.get(sec_type, sec_type),
                 "remediation": fix_hint,

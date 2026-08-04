@@ -418,9 +418,17 @@ def _run_one_inner(case, resolved_case, auth_headers, base_url, auth, timeout, s
                 if val is None:
                     # Silent failure is the worst kind — log so the user knows
                     # why downstream cases that depend on this var are about
-                    # to fail with `unresolved variables`.
+                    # to fail with `unresolved variables`. Print the body's
+                    # top-level shape so the user can spot envelope-wrapped
+                    # responses where their path was missing `data.` prefix
+                    # (the scenario/extract-tooling bug report 2026-08-03).
+                    shape = (list(body_data.keys())[:6]
+                             if isinstance(body_data, dict)
+                             else type(body_data).__name__)
                     print(f"[extract] case {case['id']}: var '{name}' not found via "
-                          f"path '{path}' — downstream cases may fail", file=sys.stderr)
+                          f"path '{path}' — body top-level: {shape}. "
+                          f"Downstream cases may fail with unresolved variables.",
+                          file=sys.stderr)
                 extracted[name] = val
         except json.JSONDecodeError:
             pass

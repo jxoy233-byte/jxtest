@@ -124,6 +124,7 @@ def cmd_create(args: argparse.Namespace) -> None:
         "values": {"TOKEN": "REPLACE_ME", "USER": "REPLACE_ME"},
     })
     print(f"OK  created env/{args.name}.json")
+    _warn_plaintext_secrets(args.name)
 
 
 def cmd_set(args: argparse.Namespace) -> None:
@@ -132,6 +133,20 @@ def cmd_set(args: argparse.Namespace) -> None:
     save_env(args.name, data)
     print(f"OK  {args.name}.{args.key} = {mask_value(args.key, args.value)}")
     _warn_if_header_shaped(args.key, args.value)
+    _warn_plaintext_secrets(args.name, key=args.key)
+
+
+def _warn_plaintext_secrets(name: str, key: str | None = None) -> None:
+    """Nudge the user when an env file is written with a value that looks
+    like a real secret. The file is plain JSON (`show` masks on display, but
+    the on-disk file is plaintext) — a `git add env/` will commit real
+    tokens. Issue: env plaintext save (experience report 2026-08-03).
+    """
+    if SECRET_KEYS.search(key or ""):
+        print("  [!] env files are plain JSON — add to .gitignore:",
+              file=sys.stderr)
+        print(f"      env/{name}.local.json   # or use a secrets manager",
+              file=sys.stderr)
 
 
 def cmd_resolve(args: argparse.Namespace) -> None:
@@ -171,13 +186,36 @@ def cmd_test(args: argparse.Namespace) -> None:
         print(f"  ✗ {args.name} has no baseUrl — run `jxtest env create {args.name} --base-url <URL>`")
         _sys.exit(1)
 
-    # Check 1: base URL is reachable
+    # Check 1: base URL is reachable. Treat 4xx as "reachable but no root
+    # index" — FastAPI/Express without a mounted `/` legitimately return
+    # 404 here, and the previous version flagged that as unreachable
+    # (experience report 2026-08-03). Only network-level failures mean the
+    # host is actually down.
     print(f"  Checking {args.name} → {base_url}")
     try:
         req = _urq.Request(base_url + "/", method="GET")
-        with _urq.urlopen(req, timeout=5) as r:
-            print(f"  ✓ baseUrl reachable (HTTP {r.status})")
-    except Exception as e:
+        try:
+            with _urq.urlopen(req, timeout=5) as r:
+                print(f"  ✓ baseUrl reachable (HTTP {r.status} on /)")
+        except _ur.HTTPError as e:
+            if 400 <= e.code < 500:
+                # Server is up and answering — no root index is a normal design
+                # choice (FastAPI defaults, Express default, etc.). Probe a
+                # conventional doc endpoint as a second signal; if that also
+                # 404s we still consider it reachable.
+                doc_probe = base_url + "/docs"
+                try:
+                    with _urq.urlopen(_urq.Request(doc_probe, method="GET"), timeout=3) as r2:
+                        print(f"  ✓ baseUrl reachable (HTTP {e.code} on /, "
+                              f"HTTP {r2.status} on /docs — no root index, server up)")
+                except Exception:
+                    print(f"  ✓ baseUrl reachable (HTTP {e.code} on / — no root index, server up)")
+            else:
+                print(f"  ✗ baseUrl returned HTTP {e.code} on /")
+                if not args.no_fail:
+                    _sys.exit(1)
+                return
+    except (_ur.URLError, OSError, TimeoutError) as e:
         print(f"  ✗ baseUrl unreachable: {type(e).__name__}: {e}")
         if not args.no_fail:
             _sys.exit(1)

@@ -54,10 +54,15 @@ def worker_loop(vu_id: int, cases: list, base_url: str, auth_headers: dict, defa
             err_kind = "server"
         else:
             err_kind = None
+        # Fall back to case id when endpointId is missing — `case["endpointId"]`
+        # used to raise KeyError on hand-written cases, silently killing the
+        # worker after one iteration (issue: load 30 VUs × 15s ran 30 reqs in
+        # 0.12s — bug report 2026-08-03).
+        ep_id = case.get("endpointId") or case.get("id") or f"<missing-vu{vu_id}>"
         with lock:
             latencies.append(latency)
             errors_count[0] += 1 if is_error else 0
-            ep = by_endpoint.setdefault(case["endpointId"], {"count": 0, "errors": 0, "latencies": []})
+            ep = by_endpoint.setdefault(ep_id, {"count": 0, "errors": 0, "latencies": []})
             ep["count"] += 1
             if is_error:
                 ep["errors"] += 1
@@ -66,7 +71,7 @@ def worker_loop(vu_id: int, cases: list, base_url: str, auth_headers: dict, defa
             if rng.random() < sample_rate:
                 all_requests.append({
                     "vu": vu_id,
-                    "endpointId": case["endpointId"],
+                    "endpointId": ep_id,
                     "status": status,
                     "latency_ms": latency,
                     "err_kind": err_kind,
@@ -87,6 +92,15 @@ def run_scenario(cases: list, base_url: str, auth_headers: dict, defaults: dict,
     end_time = start + duration_s
 
     with ThreadPoolExecutor(max_workers=vus) as ex:
+        def _safe_worker(*args, **kwargs):
+            # Worker exceptions used to be swallowed silently — the whole run
+            # would look healthy for 30 VUs × 15s but actually exit after one
+            # iteration. Surface the trace so the next bug is debuggable.
+            try:
+                worker_loop(*args, **kwargs)
+            except Exception as e:
+                print(f"  [vu {args[0]}] worker crashed: {type(e).__name__}: {e}",
+                      file=sys.stderr)
         for i in range(vus):
             delay = (ramp_up_s / vus) * i if i > 0 and ramp_up_s > 0 else 0
             time.sleep(delay)
@@ -94,7 +108,7 @@ def run_scenario(cases: list, base_url: str, auth_headers: dict, defaults: dict,
                 break
             # Sample-rate cap: keep all_requests ≤ ~5000 entries regardless of load
             sample_rate = min(1.0, 5000 / max(vus * duration_s * 10, 1))
-            ex.submit(worker_loop, i, cases, base_url, auth_headers, defaults,
+            ex.submit(_safe_worker, i, cases, base_url, auth_headers, defaults,
                       end_time, latencies, by_endpoint, errors_count,
                       all_requests, lock, sample_rate)
 

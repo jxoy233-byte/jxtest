@@ -409,13 +409,16 @@ def print_human(report: dict) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Preflight API specs, cases, env, auth, envelope, and dependencies")
-    parser.add_argument("spec", nargs="?", default="api-spec.json", help="api-spec.json")
+    parser.add_argument("spec", nargs="?", default=None, help="api-spec.json (positional, default api-spec.json)")
+    parser.add_argument("--spec", dest="spec_flag", default=None,
+                        help="Same as positional spec — added for flag consistency with `jxtest env validate --spec`")
     parser.add_argument("--cases", default="test-cases.json", help="test-cases.json")
     parser.add_argument("--env", help="Environment name (env/<name>.json)")
     parser.add_argument("--json", action="store_true", help="Emit one stable JSON report on stdout")
     parser.add_argument("--strict", action="store_true", help="Treat warnings as a failed preflight")
     args = parser.parse_args()
-    report = build_report(Path(args.spec), Path(args.cases), args.env)
+    spec_path = args.spec_flag or args.spec or "api-spec.json"
+    report = build_report(Path(spec_path), Path(args.cases), args.env)
     if args.json:
         print(json.dumps(report, indent=2, ensure_ascii=False, sort_keys=False))
     else:

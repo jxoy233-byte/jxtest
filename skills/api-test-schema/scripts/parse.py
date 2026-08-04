@@ -393,6 +393,8 @@ def main() -> None:
     ap.add_argument("--format", choices=["openapi", "postman", "har"], help="Force format")
     ap.add_argument("--envelope", help="Business-code envelope, e.g. 'code:0' or 'data.code:0,200'")
     ap.add_argument("--auth", help="Auth config as JSON, or @path/to/auth.json")
+    ap.add_argument("--json", action="store_true",
+                    help="Emit the parsed api-spec as JSON on stdout (mirrors `jxtest scenario --json` / `jxtest env validate --json`)")
     args = ap.parse_args()
 
     src = Path(args.input)
@@ -419,8 +421,15 @@ def main() -> None:
             sys.exit(f"Error: --auth is not valid JSON: {e}")
 
     out = Path(args.output)
-    out.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"OK  {len(result['endpoints'])} endpoints  {out}", file=sys.stderr)
+    if args.json:
+        # Mirror `jxtest scenario --json` / `jxtest env validate --json`: write
+        # the parsed spec to stdout so pipes/AI workflows don't have to read a
+        # side file. The user-facing summary still goes to stderr.
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        print(f"OK  {len(result['endpoints'])} endpoints  (stdout)", file=sys.stderr)
+    else:
+        out.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"OK  {len(result['endpoints'])} endpoints  {out}", file=sys.stderr)
     print(f"    baseUrl: {result['baseUrl']}", file=sys.stderr)
     print(f"    title:   {result['title']}", file=sys.stderr)
     if result.get("envelope"):

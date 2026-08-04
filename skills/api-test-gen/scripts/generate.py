@@ -378,25 +378,39 @@ def _body_or_none(endpoint: dict) -> Any:
 
 
 
-def _schema_example(schema: dict) -> Any:
+def _schema_example(schema: dict, prop_name: str = "") -> Any:
+    """Build an example value from a schema. Falls back to faker-style values
+    (via `_example_for`) so generated bodies don't end up as `{"username":
+    "string", "password": "string"}` — those literal type-name placeholders
+    caused 200+ 401 failures on real APIs (issue: gen placeholder body, ERP
+    实战 v2 报告 2026-08-03).
+
+    The recursion preserves object/array shape; leaf nodes use `_example_for`
+    so field-name heuristics (username/email/password) and format hints
+    (email/uuid/uri) produce realistic values instead of type-name strings.
+    `prop_name` is the JSON key under which this schema appears — used to
+    feed name-aware heuristics like "alice_smith_{{$uuid}}" for username.
+    """
     if "example" in schema:
         return schema["example"]
     if "default" in schema:
         return schema["default"]
     t = schema.get("type")
     if t == "object":
-        return {k: _schema_example(v) for k, v in schema.get("properties", {}).items()}
+        return {k: _schema_example(v, k) for k, v in schema.get("properties", {}).items()}
     if t == "array":
-        return [_schema_example(schema.get("items", {}))]
-    if t == "string":
-        return schema.get("enum", ["string"])[0] if schema.get("enum") else "string"
-    if t == "integer":
-        return 0
-    if t == "number":
-        return 0.0
-    if t == "boolean":
-        return False
-    return None
+        return [_schema_example(schema.get("items", {}), prop_name)]
+    # Leaf: defer to _example_for so string/number/integer/boolean all get
+    # faker-style values. Prefer the prop_name (the JSON key) for name-aware
+    # heuristics; fall back to title/description if the key is absent.
+    name_hint = prop_name or schema.get("title") or schema.get("description") or ""
+    fmt = schema.get("format")
+    # honor explicit enum first — _example_for also handles enum but skipping
+    # it here keeps the historical "use the first enum value" semantics.
+    if schema.get("enum"):
+        return schema["enum"][0]
+    val = _example_for(t or "string", fmt, name_hint)
+    return val
 
 
 def _example_for(t: str, fmt: str | None = None, name: str = "") -> Any:
