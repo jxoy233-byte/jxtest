@@ -7,8 +7,13 @@ import re
 import sys
 from pathlib import Path
 
-from _common.jsonpath import get_json_path
-from _common.resolve import VAR_RE, _DYNAMIC_VAR_RE, find_vars
+# Self-bootstrap so this script works when invoked directly (e.g. by Claude Code
+# skills) — without `bin/jxtest` adding `skills/` to sys.path, `from _common`
+# would fail with ModuleNotFoundError. `bin/jxtest` does this for us; we add it
+# here too so the script is location-independent.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from _common.jsonpath import get_json_path  # noqa: E402
+from _common.resolve import VAR_RE, _DYNAMIC_VAR_RE, find_vars  # noqa: E402
 
 
 PLACEHOLDER_RE = re.compile(r"^(?:REPLACE_ME|TODO|CHANGE_ME|<[^>]+>|string|example)$", re.IGNORECASE)

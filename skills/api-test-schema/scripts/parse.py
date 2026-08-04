@@ -10,7 +10,11 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
-from _common import parse_envelope_arg
+# Self-bootstrap so this script works when invoked directly (e.g. by Claude Code
+# skills) — without `bin/jxtest` adding `skills/` to sys.path, `from _common`
+# would fail with ModuleNotFoundError.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from _common import parse_envelope_arg  # noqa: E402
 
 METHODS = {"get", "post", "put", "delete", "patch", "head", "options"}
 

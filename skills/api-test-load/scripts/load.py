@@ -10,7 +10,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from _common import build_url, execute, resolve_auth, load_env, apply_defaults
+# Self-bootstrap so this script works when invoked directly (e.g. by Claude Code
+# skills) — without `bin/jxtest` adding `skills/` to sys.path, `from _common`
+# would fail with ModuleNotFoundError.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from _common import build_url, execute, resolve_auth, load_env, apply_defaults  # noqa: E402
 
 
 def parse_duration(s: str) -> float:

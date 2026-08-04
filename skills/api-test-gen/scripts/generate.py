@@ -432,12 +432,33 @@ def _example_for(t: str, fmt: str | None = None, name: str = "") -> Any:
         return "{{$iso}}"
     if fmt == "date":
         return "2026-01-15"
-    # Name-aware realistic values (heuristic by field name)
+    # Name-aware realistic values (heuristic by field name).
+    # Order matters: more-specific tokens (username, password) must come BEFORE
+    # generic substring matches ("name" matches "username" too — previous bug:
+    # username field generated "Alice Smith" instead of a unique login). Use
+    # word-boundary matching for "name" so we only match standalone name fields.
+    import re as _re
     name_l = name.lower()
     if "email" in name_l:
         return "alice.smith+{{$uuid}}@example.com"
-    if any(k in name_l for k in ("name", "first", "given")):
+    # username / user / password / api_key — checked FIRST so the generic "name"
+    # check below doesn't swallow them.
+    if "username" in name_l or "user_name" in name_l:
+        return "alice_smith_{{$uuid}}"
+    if "password" in name_l or "passwd" in name_l or "passphrase" in name_l:
+        return "P@ssw0rd!2026"
+    if "secret" in name_l or "token" in name_l:
+        return "P@ssw0rd!2026"
+    if "api_key" in name_l or "apikey" in name_l:
+        return "sk-test-{{$uuid}}"
+    if "user" in name_l:
+        # `user` is broad — only safe AFTER username/user_name/password are caught.
+        return "alice_smith_{{$uuid}}"
+    # Standalone name fields — word-boundary so "filename" doesn't trigger.
+    if _re.search(r"(?:^|[_\-])name(?:$|[_\-])", name_l) or name_l in ("name", "first", "given", "firstname", "givenname"):
         return "Alice Smith"
+    if "first" in name_l or "given" in name_l:
+        return "Alice"
     if "last" in name_l or "surname" in name_l or "family" in name_l:
         return "Johnson"
     if "phone" in name_l or "mobile" in name_l:
@@ -464,12 +485,6 @@ def _example_for(t: str, fmt: str | None = None, name: str = "") -> Any:
         return "standard"
     if "tag" in name_l:
         return "production"
-    if "username" in name_l or "user" in name_l:
-        return "alice_smith_{{$uuid}}"
-    if "password" in name_l or "secret" in name_l or "token" in name_l:
-        return "P@ssw0rd!2026"
-    if "api_key" in name_l or "apikey" in name_l:
-        return "sk-test-{{$uuid}}"
     if "sku" in name_l or "code" in name_l:
         return "SKU-{{$uuid}}"
     # Type-driven defaults

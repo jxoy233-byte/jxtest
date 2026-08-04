@@ -12,7 +12,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from xml.sax.saxutils import escape, quoteattr
 
-from _common import (build_url, execute, resolve_auth, deep_resolve, load_env, apply_defaults,
+# Self-bootstrap so this script works when invoked directly (e.g. by Claude Code
+# skills) — without `bin/jxtest` adding `skills/` to sys.path, `from _common`
+# would fail with ModuleNotFoundError.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from _common import (build_url, execute, resolve_auth, deep_resolve, load_env, apply_defaults,  # noqa: E402
                      find_unresolved, find_vars, get_json_path, load_envelope, parse_envelope_arg,
                      classify, describe, business_code, detect_envelope,
                      resolve_envelope_for_case)
@@ -594,6 +598,21 @@ def main() -> None:
     if auth_error:
         print(f"Auth warning: {auth_error}", file=sys.stderr)
 
+    # Login-style auth is a race hazard under --parallel > 1: each worker's
+    # first call to auth.headers() triggers a fresh POST /auth/login, and the
+    # server may invalidate the other workers' sessions as a side effect.
+    # Per-worker auth clones (above) fix the token-cache side, but login itself
+    # is still a server-side mutation — drop the default to 1 unless the user
+    # explicitly opts into a higher value. (Experience report 2026-08-04:
+    # 'POST /auth/login_positive 自爆 401 — 需要 --parallel 1 才稳'.)
+    parallel = args.parallel
+    if auth.type == "login" and parallel > 1 and "--parallel" not in sys.argv and "-p" not in sys.argv:
+        print(f"[parallel] auth.type=login — defaulting to --parallel 1 "
+              f"(per-worker auth clones still active, but the login endpoint "
+              f"itself is a race hazard under high concurrency). "
+              f"Pass -p N explicitly to override.", file=sys.stderr)
+        parallel = 1
+
     spec = {}
     if args.spec and Path(args.spec).exists():
         spec = json.loads(Path(args.spec).read_text(encoding="utf-8"))
@@ -681,7 +700,14 @@ def main() -> None:
                 results.append(run_sequential(c))
         else:
             with ThreadPoolExecutor(max_workers=min(parallel, len(phase))) as ex:
-                futures = {ex.submit(run_one, c, base_url, auth, args.timeout, scopes,
+                # Per-worker auth: the shared `auth` object used to be passed
+                # to every parallel worker, so one worker's refresh-after-401
+                # (or its login_positive case invalidating the cached token)
+                # would silently kill the tokens the other workers were using.
+                # clone_auth() is cheap (no I/O) — each worker gets an
+                # independent provider and triggers its own login if needed.
+                from _common.auth import clone_auth
+                futures = {ex.submit(run_one, c, base_url, clone_auth(auth), args.timeout, scopes,
                                      pre_hook, spec, defaults, None, envelope,
                                      args.custom_asserts, data): c
                            for c in phase}

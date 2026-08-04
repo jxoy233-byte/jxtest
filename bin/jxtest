@@ -27,6 +27,8 @@ CMDS = {
     "factory": ("api-test-factory", "factory.py"),
     "suite":    ("api-test-suite",  "suite.py"),
     "doctor":   ("api-test-doctor",  "doctor.py"),
+    "install":  ("api-test-installer", "install.py"),
+    "uninstall": ("api-test-installer", "install.py"),
 }
 
 HELP = """jxtest — AI-native API testing toolkit
@@ -52,6 +54,8 @@ Commands:
   factory   Generate per-test unique data + auto-cleanup after the run
   suite     Manage named test suites (save filter presets, run by name)
   doctor    Preflight spec/cases/env/auth/envelope/dependencies and suggest next steps
+  install   Symlink 17 jxtest skills into ~/.claude/skills/ for Claude Code
+  uninstall Remove jxtest symlinks from ~/.claude/skills/
   completion Generate shell completion (bash|zsh|fish)
 
 Examples:
@@ -74,7 +78,7 @@ def main() -> None:
         print(HELP)
         sys.exit(0)
     if sys.argv[1] in ("-V", "--version"):
-        print("jxtest 1.4")
+        print("jxtest 1.5")
         sys.exit(0)
 
     cmd = sys.argv[1]
@@ -94,7 +98,12 @@ def main() -> None:
     # script's own dir (so sibling scripts like `contract.py` are importable).
     sys.path.insert(0, str(SKILLS))
     sys.path.insert(0, str(script_path.parent))
-    sys.argv = [str(script_path), *sys.argv[2:]]
+    # For multi-mode scripts (install/uninstall), the router-level command name
+    # is the subcommand — pass it through so the script knows which mode to run.
+    forwarded = [*sys.argv[2:]]
+    if cmd in ("install", "uninstall"):
+        forwarded = [cmd, *forwarded]
+    sys.argv = [str(script_path), *forwarded]
     runpy.run_path(str(script_path), run_name="__main__")
 
 

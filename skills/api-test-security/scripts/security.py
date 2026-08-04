@@ -12,7 +12,11 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from _common import (build_url, execute, resolve_auth, load_env,
+# Self-bootstrap so this script works when invoked directly (e.g. by Claude Code
+# skills) — without `bin/jxtest` adding `skills/` to sys.path, `from _common`
+# would fail with ModuleNotFoundError.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from _common import (build_url, execute, resolve_auth, load_env,  # noqa: E402
                      load_envelope, parse_envelope_arg, classify, describe,
                      detect_envelope)
 
@@ -436,6 +440,18 @@ def build_findings(results: list[dict]) -> list[dict]:
             body_excerpt = (r.get("body") or "")[:160]
             evidence = f"Got {observed}, expected the request to be refused"
             outcome = r.get("outcome")
+            http_status = r.get("httpStatus")
+            # 404 on a probe = server didn't expose resource existence, which is
+            # actually safer than 403 (returning 403 confirms the resource
+            # exists; 404 reveals nothing). Demote to info so the report doesn't
+            # flood with false-positive "critical" IDOR/SSRF/path-traversal
+            # findings when the server uses not-found as its refusal pattern
+            # (experience report 2026-08-04).
+            if http_status == 404 and sec_type in ("idor", "ssrf", "path_traversal", "broken_auth_empty",
+                                                   "broken_auth_garbage", "broken_auth_expired"):
+                severity = "info"
+                evidence = (f"Got {observed} — server refused with Not Found, which doesn't "
+                            f"expose resource existence (safer than 403). Not a vulnerability.")
             if outcome == "server_error":
                 severity = "medium" if severity in ("critical", "high") else severity
                 evidence = (f"Got {observed} — server error, likely a bug "

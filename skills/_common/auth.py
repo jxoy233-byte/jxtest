@@ -194,3 +194,20 @@ def _unresolved_or(value, env_name: str) -> str:
 def resolve_auth(auth: dict | None, scopes: list[dict], base_url: str = "") -> AuthProvider:
     """Build an AuthProvider. Templates in `auth` are resolved against `scopes`."""
     return AuthProvider(auth, scopes, base_url)
+
+
+def clone_auth(provider: AuthProvider) -> AuthProvider:
+    """Deep-clone an AuthProvider so parallel workers don't share token state.
+
+    Shared `_headers` is the silent race hazard: one worker's refresh (after a
+    401) wipes every other worker's token mid-request. `clone()` returns an
+    independent provider with the same config but its own lock + cache.
+    Cheap — no network I/O. The clone is unbuilt (no token yet); first call
+    to `.headers()` will trigger the actual login on that worker.
+    """
+    new = AuthProvider.__new__(AuthProvider)
+    new.auth = provider.auth  # already resolved, safe to share
+    new.base_url = provider.base_url
+    new._lock = threading.Lock()
+    new._headers = None  # independent cache
+    return new
